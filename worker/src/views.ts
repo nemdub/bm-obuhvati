@@ -185,6 +185,7 @@ function labelBundle(script: Script) {
     parityAll: t("parityAll"), parityOdd: t("parityOdd"), parityEven: t("parityEven"),
     reviewReason: t("reviewReason"),
     changeStreet: t("changeStreet"), searchStreet: t("searchStreet"), manualStreetSet: t("manualStreetSet"),
+    addStreet: t("addStreet"), addedBadge: t("addedBadge"), removeAdded: t("removeAdded"),
     polygon: t("polygon"), noPolygon: t("noPolygon"), stale: t("stale"), recomputeQueued: t("recomputeQueued"),
     source: t("source"), base: t("base"), amendment: t("amendment"),
   };

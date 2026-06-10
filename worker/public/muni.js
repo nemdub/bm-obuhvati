@@ -44,6 +44,13 @@
   fetch(`/api/m/${cfg.muniId}/polygons.geojson`)
     .then((r) => r.json())
     .then((fc) => {
+      let boundaryLayer = null;
+      if (fc.boundaries && fc.boundaries.length) {
+        boundaryLayer = L.geoJSON(
+          { type: "FeatureCollection", features: fc.boundaries.map((g) => ({ type: "Feature", geometry: g })) },
+          { style: { color: "#616161", weight: 1.5, dashArray: "6 4", fill: false }, interactive: false }
+        ).addTo(map);
+      }
       const layer = L.geoJSON(fc, {
         style: (f) => ({ color: color(f.properties.number), weight: 1, fillOpacity: 0.25, fillColor: color(f.properties.number) }),
         onEachFeature: (f, l) => {
@@ -54,6 +61,7 @@
         },
       }).addTo(map);
       const b = layer.getBounds();
+      if (boundaryLayer) b.extend(boundaryLayer.getBounds());
       if (b.isValid()) map.fitBounds(b, { padding: [20, 20] });
     });
 })();

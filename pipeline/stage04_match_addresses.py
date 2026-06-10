@@ -62,7 +62,7 @@ def build_indexes():
         # "НИКОЛЕ ТЕСЛЕ", "ПИШТЕ ДАНКОА" as "ДАНКО ПИШТА") and order-insensitive keys
         # ("ЂЕРЂА ДОЖЕ" reachable as "Дожа Ђерђа"). A literal street name always wins.
         gvs = genitive_variants(norm)
-        for altkey in (*gvs, _sortkey(norm), *(_sortkey(g) for g in gvs)):
+        for altkey in (*gvs, _sortkey(norm), *(_sortkey(g) for g in gvs), _strip_ulica(norm)):
             if altkey and altkey not in sett:
                 sett[altkey] = [sid]
 
@@ -97,7 +97,36 @@ def resolve_settlement(settlement_raw, muni, settlements_by_muni) -> str | None:
         best = process.extractOne(target, [n for _, n in cands], scorer=fuzz.WRatio)
         if best and best[1] >= FUZZY_MIN:
             return cands[best[2]][0]
+        # Unique word-containment: station addresses say "ЗЕМУН, ..." while the register
+        # settlement is "БЕОГРАД (ЗЕМУН)" — WRatio length-penalizes that below threshold.
+        tw = set(target.split())
+        hits = [sid for sid, norm in cands if tw and tw <= set(norm.split())]
+        if len(hits) == 1:
+            return hits[0]
     return None
+
+
+def _strip_ulica(norm: str) -> str | None:
+    """Drop a standalone 'УЛИЦА' word ("Поручничка улица" <-> register "ПОРУЧНИЧКА").
+    Applied symmetrically (also as a register-side alternate, for names like
+    "ЗМАЈЕВА УЛИЦА" vs doc "Змајева")."""
+    words = norm.split()
+    if len(words) > 1 and "УЛИЦА" in words:
+        return " ".join(w for w in words if w != "УЛИЦА")
+    return None
+
+
+def _part_streets(primary: str, scope: dict[str, list[str]]) -> list[str]:
+    """Register streets that are numbered PARTS of a plain base name: doc "Војни Пут"
+    claims register "ВОЈНИ ПУТ 1" + "ВОЈНИ ПУТ 2" (suffix tokens must be digits/ДЕО)."""
+    out: list[str] = []
+    prefix = primary + " "
+    for name, ids in scope.items():
+        if name.startswith(prefix):
+            rest = name[len(prefix):].split()
+            if rest and all(w.isdigit() or w == "ДЕО" for w in rest):
+                out.extend(ids)
+    return out
 
 
 def _sortkey(norm: str) -> str | None:
@@ -127,11 +156,18 @@ def _token_subset(primary: str, scope: dict[str, list[str]]) -> str | None:
     return None if (best is None or tied) else best[0]
 
 
+_DIGITS_RE = re.compile(r"\d+")
+
+
 def _fuzzy(norm: str, names_map: dict[str, list[str]]) -> tuple[str, float] | None:
     if not names_map:
         return None
     best = process.extractOne(norm, list(names_map.keys()), scorer=fuzz.WRatio)
     if best and best[1] >= FUZZY_MIN:
+        # Digit guard: names differing in their NUMBERS are different streets even at a
+        # high string score ("... 1 ДЕО" vs "... 10 ДЕО", "7 ВОЈВОЂАНСКЕ" vs "8 ...").
+        if _DIGITS_RE.findall(norm) != _DIGITS_RE.findall(best[0]):
+            return None
         return names_map[best[0]][0], float(best[1])
     return None
 
@@ -189,6 +225,29 @@ def resolve_street(street_raw, muni, settlement_id, idx
     for key in {_sortkey(primary), *(_sortkey(g) for g in gvs)}:
         if key and key in sett_scope:
             return sett_scope[key][0], exact_method, 100.0, []
+    # "Part 1" convention: the register's first part of an "N ДЕО" street is the plain
+    # base name ("Угриновачки пут 1 део" -> "УГРИНОВАЧКИ ПУТ"; parts start at 2).
+    if primary.endswith(" 1 ДЕО"):
+        base = primary[: -len(" 1 ДЕО")].strip()
+        if base in sett_scope:
+            return sett_scope[base][0], exact_method, 100.0, []
+        ids = muni_scope.get(base)
+        if ids and len(ids) == 1:
+            return ids[0], ("muni_fallback" if settlement_id else exact_method), 100.0, []
+    # Doc name without the 'улица' word ("Поручничка улица" -> register "ПОРУЧНИЧКА").
+    su = _strip_ulica(primary)
+    if su:
+        if su in sett_scope:
+            return sett_scope[su][0], exact_method, 100.0, []
+        ids = muni_scope.get(su)
+        if ids and len(ids) == 1:
+            return ids[0], ("muni_fallback" if settlement_id else exact_method), 100.0, []
+    # Plain base name where the register splits the street into numbered parts:
+    # "Војни Пут" claims ВОЈНИ ПУТ 1 + ВОЈНИ ПУТ 2. All parts are claimed (the extra ids
+    # ride in the 4th slot); flagged via 'base_parts' for review.
+    parts = _part_streets(primary, sett_scope) or _part_streets(primary, muni_scope)
+    if parts:
+        return parts[0], "base_parts", 90.0, parts[1:]
     # Fuzzy ONLY on the primary key, ONLY within the station's own settlement (catches
     # typos in the right place). Never fuzzy municipality-wide (invents matches for
     # nonexistent streets) and never fuzzy the parenthetical alternate.
@@ -377,19 +436,66 @@ def main() -> int:
         s, parsed, street_id = r, r["parsed"], r["street_id"]
         if not street_id or r["old_name_dup"]:
             continue
-        if parsed.get("whole"):
-            claims_by_street.setdefault(street_id, []).append(
-                {"seg_id": s["id"], "station_id": s["station_id"], "kind": "whole"})
-        else:
-            for iv in parsed.get("intervals", []):
-                claims_by_street.setdefault(street_id, []).append({
-                    "seg_id": s["id"], "station_id": s["station_id"], "kind": "interval",
-                    "lo": iv[0], "hi": iv[1], "parity": _iv_parity(iv),
-                    "losfx": iv[3] if len(iv) > 3 else "", "hisfx": iv[4] if len(iv) > 4 else ""})
-            for num, sfx in parsed.get("singles", []):
-                claims_by_street.setdefault(street_id, []).append({
-                    "seg_id": s["id"], "station_id": s["station_id"], "kind": "single",
-                    "num": num, "suffix": sfx})
+        # 'base_parts': a plain base name claims every numbered part street (extras ride
+        # in amb_ids), each with the same parsed numbers.
+        targets = [street_id] + (r["amb_ids"] if r["method"] == "base_parts" else [])
+        for tid in targets:
+            if parsed.get("whole"):
+                claims_by_street.setdefault(tid, []).append(
+                    {"seg_id": s["id"], "station_id": s["station_id"], "kind": "whole"})
+            else:
+                for iv in parsed.get("intervals", []):
+                    claims_by_street.setdefault(tid, []).append({
+                        "seg_id": s["id"], "station_id": s["station_id"], "kind": "interval",
+                        "lo": iv[0], "hi": iv[1], "parity": _iv_parity(iv),
+                        "losfx": iv[3] if len(iv) > 3 else "", "hisfx": iv[4] if len(iv) > 4 else ""})
+                for num, sfx in parsed.get("singles", []):
+                    claims_by_street.setdefault(tid, []).append({
+                        "seg_id": s["id"], "station_id": s["station_id"], "kind": "single",
+                        "num": num, "suffix": sfx})
+
+    # Reviewer-added street claims (streets the document omitted entirely): synthetic
+    # segments with deterministic ids (ADDED_SEG_BASE + addition id), claims like any
+    # other, and materialized into coverage_segments so links keep FK integrity.
+    added_out: list[dict] = []
+    if config.ADDITIONS_JSON.exists():
+        additions = json.loads(config.ADDITIONS_JSON.read_text())
+        n_add = 0
+        for a in additions:
+            if a["street_id"] not in street_meta:
+                continue
+            try:
+                mp = json.loads(a["manual_json"])
+            except (ValueError, TypeError):
+                continue
+            seg_id = config.ADDED_SEG_BASE + int(a["id"])
+            parsed = {"intervals": mp.get("intervals", []), "singles": mp.get("singles", []),
+                      "whole": bool(mp.get("whole")), "unknown_tokens": []}
+            tid = a["street_id"]
+            if parsed["whole"]:
+                claims_by_street.setdefault(tid, []).append(
+                    {"seg_id": seg_id, "station_id": a["station_id"], "kind": "whole"})
+            else:
+                for iv in parsed["intervals"]:
+                    claims_by_street.setdefault(tid, []).append({
+                        "seg_id": seg_id, "station_id": a["station_id"], "kind": "interval",
+                        "lo": iv[0], "hi": iv[1], "parity": _iv_parity(iv),
+                        "losfx": iv[3] if len(iv) > 3 else "", "hisfx": iv[4] if len(iv) > 4 else ""})
+                for num, sfx in parsed["singles"]:
+                    claims_by_street.setdefault(tid, []).append({
+                        "seg_id": seg_id, "station_id": a["station_id"], "kind": "single",
+                        "num": num, "suffix": sfx})
+            added_out.append({
+                "id": seg_id, "station_id": a["station_id"], "settlement_raw": None,
+                "street_raw": street_meta[tid]["name_norm"], "street_id": tid,
+                "kind": "manual_added", "parsed_json": json.dumps(parsed, ensure_ascii=False),
+                "manual_json": None, "manual_locked": 1, "confidence": 0.9, "needs_review": 0,
+                "review_reason": None, "parse_dialect": "manual", "source": "added",
+                "amendment_note": None,
+            })
+            n_add += 1
+        if n_add:
+            print(f"  reviewer-added street claims: {n_add:,}")
 
     # Pass 2: resolve each street; collect links + per-segment flags.
     links: list[dict] = []
@@ -445,6 +551,10 @@ def main() -> int:
             reasons.append("alias")
         elif method == "manual":
             conf = 0.9  # reviewer-assigned street; no flag
+        elif method == "base_parts":
+            # Plain base name expanded to all numbered part streets — confirmable.
+            conf = 0.7
+            reasons.append("base_parts")
         elif method == "muni_fallback":
             conf = 0.4
             reasons.append("muni_fallback")
@@ -477,6 +587,7 @@ def main() -> int:
             "amendment_note": r.get("amendment_note"),
         })
 
+    out_segs.extend(added_out)
     pl.DataFrame(out_segs, infer_schema_length=None).write_parquet(config.SEGMENTS_PARQUET)
     pl.DataFrame(links, infer_schema_length=None).write_parquet(config.LINKS_PARQUET)
 

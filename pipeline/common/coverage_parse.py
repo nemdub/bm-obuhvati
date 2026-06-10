@@ -181,12 +181,36 @@ def parse_compact(text: str, settlement: str = "") -> list[Segment]:
 
         for piece in _split_on_connector(rest):
             j = 0
-            while j < len(piece) and not is_number_side(piece[j]):
-                j += 1
+            while j < len(piece):
+                if not is_number_side(piece[j]):
+                    j += 1
+                    continue
+                # "Угриновачки пут 1 део": an integer followed by 'део' is part of the
+                # street NAME (register has "... N ДЕО" streets), not a house number.
+                nxt = piece[j + 1].strip(".,;").lower() if j + 1 < len(piece) else ""
+                if is_house_token(piece[j]) and nxt == "део":
+                    j += 2
+                    continue
+                # "Блок 112 С-1": a number right after 'Блок' is the BLOCK's name
+                # (register street "БЛОК 112"), not a house number.
+                prev = piece[j - 1].strip(".,;").upper() if j > 0 else ""
+                if is_house_token(piece[j]) and prev in ("БЛОК", "БЛОКА"):
+                    j += 1
+                    continue
+                break
             name_words, num_words = piece[:j], piece[j:]
             if not name_words:
                 if last_street is not None:
                     _add_numbers(last_street, num_words)
+                continue
+            street = " ".join(name_words).strip()
+            # Documents often repeat the street per building ("Блок 112 С-1, Блок 112
+            # С-2, ..."): merge into the existing same-named segment, one card per street.
+            existing = next((x for x in segments if x.street_raw == street
+                             and x.settlement_raw == settlement), None)
+            if existing is not None:
+                _add_numbers(existing, num_words)
+                last_street = existing
                 continue
             seg = _new_segment(settlement, name_words, num_words)
             segments.append(seg)
@@ -240,9 +264,15 @@ def parse_structured(text: str) -> list[Segment]:
     return segments
 
 
+# "Nth part" street names ("Угриновачки пут 1 део"): documents sometimes glue the part
+# word to the following house number ("део13") — split so tokenization sees them apart.
+_DEO_GLUE = re.compile(r"(?i)\b(део)(\d)")
+
+
 def parse_coverage(text: str) -> list[Segment]:
     """Detect dialect and parse the coverage cell into segments."""
     if not text or not text.strip():
         return []
+    text = _DEO_GLUE.sub(r"\1 \2", text)
     is_structured = bool(_ULICA.search(text) and _BROJEVI.search(text))
     return parse_structured(text) if is_structured else parse_compact(text)

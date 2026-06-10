@@ -11,7 +11,7 @@
   }).addTo(map);
   map.setView([44.0, 20.9], 7);
 
-  let pointsLayer = null, polygonLayer = null, neighborsLayer = null;
+  let pointsLayer = null, polygonLayer = null, neighborsLayer = null, boundaryLayer = null;
   let highlightSeg = null;
 
   function pointStyle(f) {
@@ -71,6 +71,10 @@
       fetch(api("/polygon.geojson")).then((r) => r.json()),
     ]);
 
+    if (boundaryLayer) map.removeLayer(boundaryLayer);
+    boundaryLayer = L.geoJSON({ type: "FeatureCollection", features: (poly.boundaries || []).map((g) => ({ type: "Feature", geometry: g })) },
+      { style: { color: "#616161", weight: 1.5, dashArray: "6 4", fill: false }, interactive: false }).addTo(map);
+
     if (neighborsLayer) map.removeLayer(neighborsLayer);
     neighborsLayer = L.geoJSON({ type: "FeatureCollection", features: (poly.neighbors || []).map((g) => ({ type: "Feature", geometry: g })) },
       { style: { color: "#9e9e9e", weight: 1, fillOpacity: 0.04, dashArray: "3" } }).addTo(map);
@@ -119,7 +123,81 @@
     return b;
   }
 
+  // Reviewer-added street claim card: street name + numbers, with a remove button only
+  // (the document never mentions this street; the claim itself is the human statement).
+  function renderAddedSegment(seg) {
+    const card = document.createElement("div");
+    card.className = "seg manual";
+    const head = document.createElement("div");
+    head.className = "seg-head";
+    head.innerHTML = `<span class="seg-title">${escapeHtml(seg.street_name)}</span>` +
+      `<span class="badge ok">${L_.addedBadge}</span>`;
+    head.onclick = () => { highlightSeg = highlightSeg === seg.id ? null : seg.id; focusSegment(highlightSeg); };
+    const body = document.createElement("div");
+    body.className = "seg-body";
+    const desc = document.createElement("p");
+    desc.className = "amend-note";
+    desc.textContent = seg.parsed.whole ? L_.wholeStreet :
+      JSON.stringify({ [L_.ranges]: seg.parsed.intervals, [L_.singles]: seg.parsed.singles });
+    body.appendChild(desc);
+    const actions = document.createElement("div");
+    actions.className = "seg-actions";
+    actions.appendChild(mkBtn(L_.removeAdded, "btn", async () => {
+      await fetch(`/api/added/${seg.added_id}`, { method: "DELETE" });
+      await reload();
+    }));
+    body.appendChild(actions);
+    card.append(head, body);
+    return card;
+  }
+
+  // "Add street" panel: search the register, add a whole-street claim to this station.
+  function renderAddPanel() {
+    const wrap = document.createElement("div");
+    wrap.className = "seg add-panel";
+    const head = document.createElement("div");
+    head.className = "seg-head";
+    head.innerHTML = `<span class="seg-title">+ ${L_.addStreet}</span>`;
+    const body = document.createElement("div");
+    body.className = "seg-body";
+    body.style.display = "none";
+    head.onclick = () => { body.style.display = body.style.display === "none" ? "block" : "none"; };
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = L_.searchStreet;
+    input.className = "street-search";
+    const list = document.createElement("div");
+    list.className = "street-results";
+    let timer = null;
+    input.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        const q = input.value.trim();
+        if (q.length < 2) { list.innerHTML = ""; return; }
+        const rows = await fetch(api(`/streets?q=${encodeURIComponent(q)}`)).then((r) => r.json());
+        list.innerHTML = "";
+        rows.forEach((r) => {
+          const item = document.createElement("div");
+          item.className = "street-item";
+          item.textContent = `${r.name} (${r.settlement})`;
+          item.onclick = async () => {
+            await fetch(api("/segments"), {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ street_id: r.id, whole: true }),
+            });
+            await reload();
+          };
+          list.appendChild(item);
+        });
+      }, 250);
+    });
+    body.append(input, list);
+    wrap.append(head, body);
+    return wrap;
+  }
+
   function renderSegment(seg) {
+    if (seg.added_id) return renderAddedSegment(seg);
     const card = document.createElement("div");
     card.className = "seg" + (seg.needs_review ? " review" : "") + (seg.manual_locked ? " manual" : "");
 
@@ -354,6 +432,7 @@
     const segs = await fetch(api("/segments")).then((r) => r.json());
     const wrap = document.getElementById("segments");
     wrap.innerHTML = "";
+    wrap.appendChild(renderAddPanel());
     segs.forEach((s) => wrap.appendChild(renderSegment(s)));
   }
 

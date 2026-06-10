@@ -21,12 +21,14 @@ from datetime import datetime, timezone
 
 import numpy as np
 import polars as pl
+import shapely
 from pyproj import Transformer
 from scipy.spatial import Voronoi, QhullError
 from shapely.geometry import MultiPoint, Point, Polygon, mapping
 from shapely.ops import transform as shp_transform, unary_union
 
 import config
+from common.boundaries import load_muni_boundaries
 
 UNASSIGNED = -1
 _TO_WGS84 = Transformer.from_crs(config.UTM_34N, config.WGS84, always_xy=True)
@@ -122,14 +124,74 @@ def to_wgs84(geom):
     return shp_transform(lambda xs, ys: _TO_WGS84.transform(xs, ys), geom)
 
 
+def station_clip_geoms(df: pl.DataFrame, boundaries: dict) -> dict[int, object]:
+    """{station_id: clip geometry (UTM)} — the union of the official boundaries of the
+    municipalities its LINKED addresses lie in (not the station's own municipality, so
+    city groups / sectioned docs that legitimately span members stay safe).
+
+    Where the register and the boundary source disagree (e.g. Crveni Krst attributes
+    ~660 addresses beyond its polygon), the outlier addresses' own coverage caps are
+    unioned back in so clipping never drops a listed address's cell."""
+    linked = df.filter(pl.col("station_id") != UNASSIGNED)
+
+    munis_of_station: dict[int, frozenset[str]] = {
+        int(sid): frozenset(str(m) for m in ms)
+        for sid, ms in linked.group_by("station_id")
+        .agg(pl.col("municipality_id").unique()).rows()
+    }
+
+    # Outlier caps: linked addresses outside their own municipality polygon.
+    outlier_caps: dict[int, list[Polygon]] = {}
+    for (mid,), grp in linked.group_by("municipality_id", maintain_order=False):
+        boundary = boundaries.get(str(mid))
+        if boundary is None:
+            continue
+        pts = shapely.points(grp["x"].to_numpy(), grp["y"].to_numpy())
+        inside = shapely.contains(boundary, pts)
+        if inside.all():
+            continue
+        sids = grp["station_id"].to_numpy()[~inside]
+        for sid, p in zip(sids, pts[~inside]):
+            outlier_caps.setdefault(int(sid), []).append(
+                p.buffer(config.POLYGON_CLIP_BUFFER_M, quad_segs=2)
+            )
+
+    # Clip geometry per distinct municipality set (most stations share one muni).
+    union_cache: dict[frozenset[str], object] = {}
+    clip_geoms: dict[int, object] = {}
+    for sid, munis in munis_of_station.items():
+        covered = frozenset(m for m in munis if m in boundaries)
+        if not covered:
+            continue  # no boundary data (until the gradovi layer lands) -> no clipping
+        if covered not in union_cache:
+            geoms = [boundaries[m] for m in covered]
+            u = geoms[0] if len(geoms) == 1 else unary_union(geoms)
+            shapely.prepare(u)
+            union_cache[covered] = u
+        clip = union_cache[covered]
+        caps = outlier_caps.get(sid)
+        if caps:
+            clip = unary_union([clip, *caps])
+            shapely.prepare(clip)
+        clip_geoms[sid] = clip
+    return clip_geoms
+
+
 def main() -> int:
     config.ensure_artifacts()
-    addr = pl.read_parquet(config.ADDRESSES_PARQUET).select("id", "settlement_id", "x", "y")
+    addr = pl.read_parquet(config.ADDRESSES_PARQUET).select(
+        "id", "settlement_id", "municipality_id", "x", "y"
+    )
     links = pl.read_parquet(config.LINKS_PARQUET).select("address_id", "station_id")
 
     df = addr.join(links, left_on="id", right_on="address_id", how="left").with_columns(
         pl.col("station_id").fill_null(UNASSIGNED)
     )
+
+    boundaries = load_muni_boundaries()
+    for g in boundaries.values():
+        shapely.prepare(g)
+    clip_geoms = station_clip_geoms(df, boundaries)
 
     # Global arrays + coarse spatial grid for halo lookup. Bucket size >= the cell cap, so
     # own-bucket + 8 neighbors covers every foreign point a boundary cell could touch.
@@ -182,10 +244,19 @@ def main() -> int:
 
     rows: list[dict] = []
     now = datetime.now(timezone.utc).isoformat()
+    n_clipped = 0
     for sid, cells in station_cells.items():
         merged = unary_union(cells).buffer(0)
         if merged.is_empty:
             continue
+        clip = clip_geoms.get(sid)
+        if clip is not None and not clip.contains(merged):
+            clipped = merged.intersection(clip).buffer(0)
+            if clipped.is_empty:
+                print(f"  WARN station {sid}: clip emptied polygon, keeping unclipped")
+            else:
+                merged = clipped
+                n_clipped += 1
         area = merged.area  # m^2 (UTM)
         wgs = to_wgs84(merged.simplify(config.SIMPLIFY_TOL_M, preserve_topology=True))
         rows.append({
@@ -202,7 +273,24 @@ def main() -> int:
         r["point_count"] = int(counts.get(r["station_id"], 0))
 
     pl.DataFrame(rows, infer_schema_length=None).write_parquet(config.POLYGONS_PARQUET)
-    print(f"  settlements: {len(settlements):,}  station polygons: {len(rows):,}")
+
+    # Simplified boundary copy for the review-UI overlay (stage06 ships it to D1).
+    brows = [
+        {
+            "municipality_id": mid,
+            "geojson": json.dumps(
+                mapping(to_wgs84(g.simplify(config.BOUNDARY_SIMPLIFY_TOL_M, preserve_topology=True))),
+                ensure_ascii=False,
+            ),
+        }
+        for mid, g in sorted(boundaries.items())
+    ]
+    pl.DataFrame(brows).write_parquet(config.MUNI_BOUNDARIES_PARQUET)
+
+    print(
+        f"  settlements: {len(settlements):,}  station polygons: {len(rows):,}"
+        f"  clipped to muni boundary: {n_clipped:,}  boundaries: {len(brows):,}"
+    )
     return 0
 
 

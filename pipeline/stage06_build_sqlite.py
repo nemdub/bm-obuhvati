@@ -56,6 +56,9 @@ TABLES: dict[str, tuple[Path, list[str]]] = {
     "polygons": (config.POLYGONS_PARQUET, [
         "station_id", "geojson", "area_m2", "point_count", "computed_at",
     ]),
+    "muni_boundaries": (config.MUNI_BOUNDARIES_PARQUET, [
+        "municipality_id", "geojson",
+    ]),
 }
 
 # Three load groups (avoids FK violations without relying on PRAGMA toggles, which
@@ -202,6 +205,15 @@ def main() -> int:
         for t, n in counts.items():
             print(f"  {t}: {n:,} rows")
         print(f"  -> {path}")
+
+    # Municipality boundaries (re-runnable, rarely changes -> own file).
+    if "muni_boundaries" in present:
+        path = config.ARTIFACTS_DIR / "import_muni_boundaries.sql"
+        counts = dump_group(
+            {"muni_boundaries": present["muni_boundaries"]},
+            ["muni_boundaries"], ["muni_boundaries"], path,
+        )
+        print(f"  muni_boundaries: {counts['muni_boundaries']:,} rows -> {path}")
 
     build_sqlite(present)
     print(f"  built {config.SQLITE_OUT}")

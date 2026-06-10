@@ -94,7 +94,12 @@ export interface SegmentRow {
   source: string;
   amendment_note: string | null;
   review_reason: string | null;
+  /** Set for reviewer-added street claims (row id in station_added_segments). */
+  added_id?: number;
 }
+
+/** Synthetic segment-id base for reviewer-added claims (shared with the pipeline). */
+export const ADDED_SEG_BASE = 9_000_000_000_000;
 
 export function effectiveParsed(seg: SegmentRow): ParsedCoverage {
   const raw = seg.ov_json ?? seg.parsed_json;
@@ -173,7 +178,41 @@ export async function getSegments(db: D1Database, stationId: number): Promise<Se
     )
     .bind(stationId)
     .all<SegmentRow>();
-  return results ?? [];
+  const segs = results ?? [];
+
+  // Reviewer-added street claims. After a pipeline recompute these exist in
+  // coverage_segments too (as id = ADDED_SEG_BASE + added.id) — skip those to avoid
+  // duplicates; additions made since the last recompute still show live.
+  const { results: added } = await db
+    .prepare(
+      `SELECT a.id AS aid, a.station_id, a.street_id, a.manual_json,
+              s.name_cyr, s.name_lat
+         FROM station_added_segments a JOIN streets s ON s.id = a.street_id
+        WHERE a.station_id = ? ORDER BY a.id`
+    )
+    .bind(stationId)
+    .all<{ aid: number; station_id: number; street_id: string; manual_json: string; name_cyr: string; name_lat: string }>();
+  const existing = new Set(segs.map((s) => s.id));
+  for (const a of added ?? []) {
+    const synthId = ADDED_SEG_BASE + a.aid;
+    if (existing.has(synthId)) {
+      const row = segs.find((s) => s.id === synthId)!;
+      row.added_id = a.aid;
+      continue;
+    }
+    segs.push({
+      id: synthId, station_id: a.station_id, settlement_raw: null,
+      street_raw: a.name_cyr, street_id: a.street_id,
+      street_name_cyr: a.name_cyr, street_name_lat: a.name_lat,
+      kind: "manual_added", parsed_json: a.manual_json,
+      ov_json: null, ov_street_id: null, ov_reviewed: null,
+      ov_street_name_cyr: null, ov_street_name_lat: null,
+      confidence: 0.9, needs_review: 0, parse_dialect: "manual",
+      source: "added", amendment_note: null, review_reason: null,
+      added_id: a.aid,
+    } as SegmentRow);
+  }
+  return segs;
 }
 
 export async function getPolygon(db: D1Database, stationId: number) {
@@ -279,6 +318,20 @@ export async function searchStreets(db: D1Database, stationId: number, q: string
     )
     .bind(st.municipality_id, needle, needle)
     .all<{ id: string; name_cyr: string; name_lat: string; settlement_cyr: string; settlement_lat: string }>();
+  return results ?? [];
+}
+
+/** Official boundary outline(s) for a municipality — includes grouped members' outlines
+ *  (Užice+Sevojno etc.), whose stations share the page and span both territories. */
+export async function muniBoundaries(db: D1Database, muniId: string) {
+  const { results } = await db
+    .prepare(
+      `SELECT geojson FROM muni_boundaries
+        WHERE municipality_id = ?
+           OR municipality_id IN (SELECT id FROM municipalities WHERE parent_id = ?)`
+    )
+    .bind(muniId, muniId)
+    .all<{ geojson: string }>();
   return results ?? [];
 }
 

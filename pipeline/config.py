@@ -15,6 +15,8 @@ ARTIFACTS_DIR = PIPELINE_DIR / "artifacts"
 
 REGISTER_CSV = DATA_DIR / "kucni_broj.csv"
 DOCS_DIR = DATA_DIR / "polling_stations_2022"
+OPSTINE_GEOJSON = DATA_DIR / "opstine.geojson"   # official municipality boundaries (WGS84)
+GRADOVI_GEOJSON = DATA_DIR / "gradovi.geojson"   # companion city layer (optional; fills munis missing above)
 
 # Stage outputs
 ADDRESSES_PARQUET = ARTIFACTS_DIR / "addresses.parquet"
@@ -29,8 +31,11 @@ SEGMENTS_PARQUET = ARTIFACTS_DIR / "segments.parquet"                 # stage04 
 AMENDMENTS_PARQUET = ARTIFACTS_DIR / "amendments.parquet"
 LINKS_PARQUET = ARTIFACTS_DIR / "links.parquet"
 POLYGONS_PARQUET = ARTIFACTS_DIR / "polygons.parquet"
+MUNI_BOUNDARIES_PARQUET = ARTIFACTS_DIR / "muni_boundaries.parquet"  # simplified boundaries for the UI
 DOC_MUNI_MAP = ARTIFACTS_DIR / "doc_municipality_map.csv"  # filename -> municipality (review me)
 OVERRIDES_JSON = ARTIFACTS_DIR / "overrides.json"  # reviewer edits exported from D1 (fetch_overrides.sh)
+ADDITIONS_JSON = ARTIFACTS_DIR / "additions.json"  # reviewer-added street claims (fetch_overrides.sh)
+ADDED_SEG_BASE = 9_000_000_000_000  # synthetic segment-id base (shared with the Worker)
 SQLITE_OUT = ARTIFACTS_DIR / "bm.sqlite"
 
 # ── Coordinate reference systems ────────────────────────────────────────────
@@ -45,6 +50,7 @@ SIMPLIFY_TOL_M = 5.0        # polygon simplification tolerance (meters)
 # Large enough to bridge addresses across a street / along a block, small enough to trim
 # parks and edges.
 POLYGON_CLIP_BUFFER_M = 180.0
+BOUNDARY_SIMPLIFY_TOL_M = 20.0  # simplification of municipality boundaries for the UI overlay
 
 # ── Matching tuning ─────────────────────────────────────────────────────────
 STREET_FUZZY_MIN = 90       # rapidfuzz score below which a street match needs review
@@ -60,12 +66,11 @@ STREET_FUZZY_MIN = 90       # rapidfuzz score below which a street match needs r
 # normalize_street()-ed at lookup, so any spelling/case works here.
 STREET_ALIASES: dict[tuple[str, str], str] = {
     ("80381", "Пинкијева"): "Хероја Пинкија",  # Sombor
-    # "Нушићева" = "Бранислава Нушића" — only in munis where the doc form is unresolved
-    # (elsewhere НУШИЋЕВА is a real register street; a global alias would corrupt those).
+    # "Нушићева" = "Бранислава Нушића". CAUTION: aliases replace the name BEFORE lookup,
+    # municipality-wide — in munis where НУШИЋЕВА is also a real register street this
+    # hijacks correctly-matching stations (verified: broke 4 Požarevac stations). Only
+    # safe where the alias target is the sole plausible street for the affected station.
     ("70785", "Нушићева"): "Бранислава Нушића",  # Majdanpek
-    ("70904", "Нушићева"): "Бранислава Нушића",  # Paraćin
-    ("70947", "Нушићева"): "Бранислава Нушића",  # Požarevac
-    ("71048", "Нушићева"): "Бранислава Нушића",  # Jagodina
 }
 
 DOC_MUNI_OVERRIDES: dict[str, str] = {

@@ -5,6 +5,7 @@ import { REVIEW_REASONS } from "./i18n";
 import {
   listMunicipalities, getMunicipality, listStations, getStation, getSegments,
   getPolygon, pointsForStation, muniPolygons, allMuniPolygons, effectiveParsed, searchStreets,
+  muniBoundaries,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
 
@@ -79,6 +80,7 @@ app.get("/api/s/:id/segments", async (c) => {
           return text;
         }),
       source: s.source,
+      added_id: s.added_id ?? null,
       amendment_note: s.amendment_note ? tr(s.amendment_note, script) : null,
     }))
   );
@@ -120,6 +122,40 @@ app.delete("/api/segments/:id/manual", async (c) => {
   return c.json({ ok: true });
 });
 
+// Add a reviewer street claim (for streets the document omitted entirely).
+app.post("/api/s/:id/segments", async (c) => {
+  const stationId = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    street_id: string; whole?: boolean;
+    intervals?: unknown[]; singles?: unknown[];
+  }>();
+  if (!body.street_id) return c.json({ ok: false, error: "street_id required" }, 400);
+  const street = await c.env.DB.prepare("SELECT id FROM streets WHERE id = ?")
+    .bind(body.street_id).first();
+  if (!street) return c.json({ ok: false, error: "unknown street" }, 400);
+  const manual = JSON.stringify({
+    intervals: body.intervals ?? [],
+    singles: body.singles ?? [],
+    whole: body.whole ?? true,
+  });
+  await c.env.DB.prepare(
+    `INSERT INTO station_added_segments (station_id, street_id, manual_json, created_at)
+     VALUES (?, ?, ?, datetime('now'))`
+  ).bind(stationId, body.street_id, manual).run();
+  await markDirty(c.env.DB, stationId);
+  return c.json({ ok: true });
+});
+
+app.delete("/api/added/:addedId", async (c) => {
+  const aid = Number(c.req.param("addedId"));
+  const row = await c.env.DB.prepare("SELECT station_id FROM station_added_segments WHERE id = ?")
+    .bind(aid).first<{ station_id: number }>();
+  if (!row) return c.notFound();
+  await c.env.DB.prepare("DELETE FROM station_added_segments WHERE id = ?").bind(aid).run();
+  await markDirty(c.env.DB, row.station_id);
+  return c.json({ ok: true });
+});
+
 app.get("/api/s/:id/streets", async (c) => {
   const script = getScript(c);
   const q = (c.req.query("q") ?? "").trim();
@@ -134,7 +170,10 @@ app.get("/api/s/:id/streets", async (c) => {
 
 app.get("/api/m/:id/polygons.geojson", async (c) => {
   const script = getScript(c);
-  const rows = await allMuniPolygons(c.env.DB, c.req.param("id"));
+  const [rows, bounds] = await Promise.all([
+    allMuniPolygons(c.env.DB, c.req.param("id")),
+    muniBoundaries(c.env.DB, c.req.param("id")),
+  ]);
   return c.json({
     type: "FeatureCollection",
     features: rows.map((r) => ({
@@ -146,6 +185,7 @@ app.get("/api/m/:id/polygons.geojson", async (c) => {
         name: script === "lat" ? r.name_lat : r.name_cyr,
       },
     })),
+    boundaries: bounds.map((b) => JSON.parse(b.geojson)),
   });
 });
 
@@ -157,11 +197,17 @@ app.get("/api/s/:id/polygon.geojson", async (c) => {
   const id = Number(c.req.param("id"));
   const poly = await getPolygon(c.env.DB, id);
   const st = await getStation(c.env.DB, id);
-  const neighbors = st ? await muniPolygons(c.env.DB, st.municipality_id, id) : [];
+  const [neighbors, bounds] = st
+    ? await Promise.all([
+        muniPolygons(c.env.DB, st.municipality_id, id),
+        muniBoundaries(c.env.DB, st.municipality_id),
+      ])
+    : [[], []];
   return c.json({
     polygon: poly ? JSON.parse(poly.geojson) : null,
     meta: poly ? { area_m2: poly.area_m2, point_count: poly.point_count, computed_at: poly.computed_at } : null,
     neighbors: neighbors.map((n) => JSON.parse(n.geojson)),
+    boundaries: bounds.map((b) => JSON.parse(b.geojson)),
   });
 });
 
