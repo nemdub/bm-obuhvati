@@ -23,7 +23,7 @@ from rapidfuzz import fuzz, process
 
 import config
 from common.coverage_parse import interval_parity
-from common.normalize import normalize_street
+from common.normalize import genitive_variants, normalize_street
 
 FUZZY_MIN = config.STREET_FUZZY_MIN
 
@@ -56,7 +56,15 @@ def build_indexes():
         gmuni = config.group_rep(muni) if muni else muni
         street_meta[sid] = {"settlement_id": set_id, "municipality_id": muni, "name_norm": norm}
         by_muni_norm.setdefault(gmuni, {}).setdefault(norm, []).append(sid)
-        by_sett_norm.setdefault(set_id, {}).setdefault(norm, []).append(sid)
+        sett = by_sett_norm.setdefault(set_id, {})
+        sett.setdefault(norm, []).append(sid)
+        # Settlement-scoped alternates: declension variants ("НИКОЛА ТЕСЛА" reachable as
+        # "НИКОЛЕ ТЕСЛЕ", "ПИШТЕ ДАНКОА" as "ДАНКО ПИШТА") and order-insensitive keys
+        # ("ЂЕРЂА ДОЖЕ" reachable as "Дожа Ђерђа"). A literal street name always wins.
+        gvs = genitive_variants(norm)
+        for altkey in (*gvs, _sortkey(norm), *(_sortkey(g) for g in gvs)):
+            if altkey and altkey not in sett:
+                sett[altkey] = [sid]
 
     addr_by_street: dict[str, list[tuple[int, int | None, str]]] = {}
     for aid, st, num, suf in zip(
@@ -92,6 +100,33 @@ def resolve_settlement(settlement_raw, muni, settlements_by_muni) -> str | None:
     return None
 
 
+def _sortkey(norm: str) -> str | None:
+    """Order-insensitive token key — Hungarian names appear in both orders ("Дожа Ђерђа" /
+    "Ђерђа Доже"). Single-word names return None (key would equal the name)."""
+    w = norm.split()
+    return " ".join(sorted(w)) if len(w) > 1 else None
+
+
+def _token_subset(primary: str, scope: dict[str, list[str]]) -> str | None:
+    """Unique settlement street whose name contains ALL of the doc name's words (>=2),
+    with the same final word (surname). Returns the street id or None."""
+    pt = primary.split()
+    if len(pt) < 2:
+        return None
+    pset = set(pt)
+    best: tuple[str, int] | None = None
+    tied = False
+    for key, ids in scope.items():
+        kt = key.split()
+        if pset <= set(kt) and kt[-1] == pt[-1] and len(kt) > len(pt):
+            extra = len(set(kt) - pset)
+            if best is None or extra < best[1]:
+                best, tied = (ids[0], extra), False
+            elif extra == best[1] and ids[0] != best[0]:
+                tied = True
+    return None if (best is None or tied) else best[0]
+
+
 def _fuzzy(norm: str, names_map: dict[str, list[str]]) -> tuple[str, float] | None:
     if not names_map:
         return None
@@ -102,11 +137,23 @@ def _fuzzy(norm: str, names_map: dict[str, list[str]]) -> tuple[str, float] | No
 
 
 _PAREN_RE = re.compile(r"\(([^)]*)\)")
+# Normalized alias lookup: (municipality_id, normalized doc name) -> normalized register name.
+_ALIASES = {
+    (muni, normalize_street(doc)): normalize_street(reg)
+    for (muni, doc), reg in config.STREET_ALIASES.items()
+}
 
 
-def resolve_street(street_raw, muni, settlement_id, idx) -> tuple[str | None, str, float]:
+def resolve_street(street_raw, muni, settlement_id, idx
+                   ) -> tuple[str | None, str, float, list[str]]:
     """Resolve a street name to a register street id, scoped to the station's settlement
-    first, then municipality (flagged 'muni_fallback'). Returns (street_id, method, score).
+    first, then municipality. Returns (street_id, method, score, ambiguous_ids).
+
+    Municipality fallback applies ONLY when the exact name exists in exactly one other
+    settlement (plausible cross-settlement coverage, flagged 'muni_fallback'). If the
+    name exists in SEVERAL other settlements, picking one would be a coin flip (e.g.
+    "Николе Тесле" exists in 7 Sombor settlements) — method 'ambiguous' is returned with
+    the candidate street ids and nothing is linked.
 
     Parentheticals are alternate names / provisional designations ("Елека Бенедека
     (493. нова)", "Корзо (Бориса Кидрича)"), NOT part of the street name. They are stripped
@@ -116,27 +163,54 @@ def resolve_street(street_raw, muni, settlement_id, idx) -> tuple[str | None, st
     m = _PAREN_RE.search(street_raw)
     primary = normalize_street(_PAREN_RE.sub(" ", street_raw)) or normalize_street(street_raw)
     alt = normalize_street(m.group(1)) if m else ""
+    # Hand-maintained alias (doc name -> register name), e.g. "Пинкијева" -> "Хероја Пинкија".
+    # Alias matches are reported as method 'alias' (flagged for review): they are asserted
+    # by us, not by the document, so the reviewer must see and confirm the substitution.
+    aliased = _ALIASES.get((muni, primary))
+    if aliased:
+        primary = aliased
+    exact_method = "alias" if aliased else "exact"
 
     sett_scope = by_sett_norm.get(settlement_id, {}) if settlement_id else {}
     muni_scope = by_muni_norm.get(muni, {})
 
     if primary in sett_scope:
-        return sett_scope[primary][0], "exact", 100.0
+        return sett_scope[primary][0], exact_method, 100.0, []
     if alt and alt in sett_scope:
-        return sett_scope[alt][0], "exact", 100.0
+        return sett_scope[alt][0], "exact", 100.0, []
+    # Genitive/nominative declension variant of the doc name (deterministic morphology,
+    # settlement scope only) — "Николе Тесле" finds nominative "НИКОЛА ТЕСЛА" and v.v.
+    # Declension variants ("Николе Тесле" finds "НИКОЛА ТЕСЛА"; "Данко Пишта" composes
+    # with sortkeys to find "ПИШТЕ ДАНКОА"), then order-insensitive lookups.
+    gvs = genitive_variants(primary)
+    for g in gvs:
+        if g in sett_scope:
+            return sett_scope[g][0], exact_method, 100.0, []
+    for key in {_sortkey(primary), *(_sortkey(g) for g in gvs)}:
+        if key and key in sett_scope:
+            return sett_scope[key][0], exact_method, 100.0, []
     # Fuzzy ONLY on the primary key, ONLY within the station's own settlement (catches
     # typos in the right place). Never fuzzy municipality-wide (invents matches for
     # nonexistent streets) and never fuzzy the parenthetical alternate.
     hit = _fuzzy(primary, sett_scope)
     if hit:
-        return hit[0], "fuzzy", hit[1]
+        return hit[0], "fuzzy", hit[1], []
+    # Token-subset within the settlement: every doc word appears in the register name and
+    # the last word (surname) matches — "ВУКА КАРАЏИЋА" ⊂ "ВУКА СТЕФАНОВИЋА КАРАЏИЋА".
+    # WRatio under-scores these because of the length difference. Flagged like fuzzy.
+    sub = _token_subset(primary, sett_scope)
+    if sub:
+        return sub, "fuzzy", 88.0, []
 
-    # Municipality exact fallback (same-named street elsewhere / cross-settlement coverage).
-    if primary in muni_scope:
-        return muni_scope[primary][0], ("muni_fallback" if settlement_id else "exact"), 100.0
-    if alt and alt in muni_scope:
-        return muni_scope[alt][0], ("muni_fallback" if settlement_id else "exact"), 100.0
-    return None, "none", 0.0
+    # Municipality exact fallback / ambiguity detection.
+    for key in ([primary] + ([alt] if alt else [])):
+        ids = muni_scope.get(key)
+        if not ids:
+            continue
+        if len(ids) == 1:
+            return ids[0], ("muni_fallback" if settlement_id else exact_method), 100.0, []
+        return None, "ambiguous", 0.0, ids
+    return None, "none", 0.0, []
 
 
 def _iv_parity(iv: list) -> str:
@@ -168,10 +242,12 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
       complementary-side houses in its span are actually covered by another station;
       otherwise the assumption is unconfirmed and the segment is flagged.
 
-    Returns (assigned: address_id -> winning claim, conflict_seg_ids, parity_unconfirmed_seg_ids).
+    Returns (assigned: address_id -> winning claim,
+             conflicts: seg_id -> set of OPPOSING station_ids,
+             parity_unconfirmed_seg_ids).
     """
     assigned: dict[int, dict] = {}
-    conflict_seg_ids: set[int] = set()
+    conflicts: dict[int, set[int]] = {}
 
     for aid, num, suf in rows:
         if num is None:
@@ -197,7 +273,8 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
         if len(stations) == 1:
             assigned[aid] = top[0]
         else:
-            conflict_seg_ids.update(c["seg_id"] for c in top)
+            for c in top:
+                conflicts.setdefault(c["seg_id"], set()).update(stations - {c["station_id"]})
 
     # Validate parity assumptions against sibling coverage.
     parity_unconfirmed: set[int] = set()
@@ -217,7 +294,7 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
         if not covered_by_other:
             parity_unconfirmed.add(c["seg_id"])
 
-    return assigned, conflict_seg_ids, parity_unconfirmed
+    return assigned, conflicts, parity_unconfirmed
 
 
 def main() -> int:
@@ -226,6 +303,13 @@ def main() -> int:
     street_meta, _bmn, _bsn, addr_by_street, settlements_by_muni, station_muni, station_settlement = idx
 
     segs = pl.read_parquet(config.SEGMENTS_AMENDED_PARQUET).to_dicts()
+
+    # Reviewer overrides exported from D1 (fetch_overrides.sh). Manual street assignments
+    # and number edits take precedence over machine parsing, so polygons reflect review.
+    overrides: dict[int, dict] = {}
+    if config.OVERRIDES_JSON.exists():
+        overrides = {int(o["segment_id"]): o for o in json.loads(config.OVERRIDES_JSON.read_text())}
+        print(f"  reviewer overrides loaded: {len(overrides):,}")
 
     # Pass 1: resolve a register street for every segment.
     seg_recs: list[dict] = []
@@ -239,8 +323,24 @@ def main() -> int:
             resolve_settlement(s["settlement_raw"], muni, settlements_by_muni)
             or station_settlement.get(s["station_id"])
         )
-        street_id, method, score = resolve_street(s["street_raw"], muni, settlement_id, idx)
-        rec = {**s, "parsed": parsed, "street_id": street_id, "method": method, "score": score}
+        street_id, method, score, amb_ids = resolve_street(s["street_raw"], muni, settlement_id, idx)
+
+        # Apply reviewer override: manual street wins (if it exists in the register) and
+        # manual number edits replace the machine parse for claim building.
+        ov = overrides.get(s["id"])
+        if ov:
+            if ov.get("manual_street_id") and ov["manual_street_id"] in street_meta:
+                street_id, method, score, amb_ids = ov["manual_street_id"], "manual", 100.0, []
+            if ov.get("manual_json"):
+                try:
+                    mp = json.loads(ov["manual_json"])
+                    parsed = {"intervals": mp.get("intervals", []), "singles": mp.get("singles", []),
+                              "whole": bool(mp.get("whole")), "unknown_tokens": []}
+                except (ValueError, TypeError):
+                    pass
+
+        rec = {**s, "parsed": parsed, "street_id": street_id, "method": method, "score": score,
+               "amb_ids": amb_ids}
         seg_recs.append(rec)
         if not street_id:
             continue
@@ -260,14 +360,21 @@ def main() -> int:
     # Pass 2: resolve each street; collect links + per-segment flags.
     links: list[dict] = []
     matched_seg_ids: set[int] = set()
-    conflict_seg_ids: set[int] = set()
+    conflict_map: dict[int, set[int]] = {}  # seg_id -> opposing station_ids
     parity_unconfirmed: set[int] = set()
     seg_conf = {r["id"]: round(r["score"] / 100.0, 2) for r in seg_recs}
+    # Printed station number per station id (for human-readable conflict reasons).
+    _st = pl.read_parquet(config.STATIONS_PARQUET)
+    station_number = dict(zip(_st["id"], _st["number"]))
+    # Settlement names (for human-readable ambiguity reasons).
+    _setts = pl.read_parquet(config.SETTLEMENTS_PARQUET)
+    sett_names = dict(zip(_setts["id"], _setts["name_cyr"]))
 
     for street_id, claims in claims_by_street.items():
         rows = addr_by_street.get(street_id, [])
         assigned, conflicts, unconfirmed = resolve_street_claims(claims, rows)
-        conflict_seg_ids |= conflicts
+        for seg_id, opponents in conflicts.items():
+            conflict_map.setdefault(seg_id, set()).update(opponents)
         parity_unconfirmed |= unconfirmed
         for aid, win in assigned.items():
             matched_seg_ids.add(win["seg_id"])
@@ -282,12 +389,26 @@ def main() -> int:
     for r in seg_recs:
         parsed, method = r["parsed"], r["method"]
         reasons: list[str] = []
-        if r["street_id"] is None:
+        if method == "ambiguous":
+            # Same-named street in several other settlements — not resolved automatically.
+            conf = 0.2
+            setts = sorted({
+                sett_names.get(street_meta[sid]["settlement_id"], "")
+                for sid in r["amb_ids"] if sid in street_meta
+            })
+            reasons.append("ambiguous:" + "|".join(n for n in setts if n))
+        elif r["street_id"] is None:
             conf = 0.2
             reasons.append("street_unresolved")
         elif method == "fuzzy":
             conf = 0.5
             reasons.append("fuzzy")
+        elif method == "alias":
+            # Hand-maintained substitution — surfaced so the reviewer confirms it once.
+            conf = 0.6
+            reasons.append("alias")
+        elif method == "manual":
+            conf = 0.9  # reviewer-assigned street; no flag
         elif method == "muni_fallback":
             conf = 0.4
             reasons.append("muni_fallback")
@@ -303,8 +424,10 @@ def main() -> int:
             reasons.append("amendment")
         if not parsed.get("whole") and r["id"] not in matched_seg_ids:
             reasons.append("no_match")
-        if r["id"] in conflict_seg_ids:
-            reasons.append("conflict")
+        if r["id"] in conflict_map:
+            # Parameterized code: conflict:<opposing station numbers joined by |>.
+            nums = sorted({station_number.get(sid, sid) for sid in conflict_map[r["id"]]})
+            reasons.append("conflict:" + "|".join(str(n) for n in nums))
         if r["id"] in parity_unconfirmed:
             reasons.append("parity_unconfirmed")
 
@@ -324,7 +447,7 @@ def main() -> int:
     n_review = sum(x["needs_review"] for x in out_segs)
     n_unres = sum(1 for x in out_segs if x["street_id"] is None)
     print(f"  segments: {len(out_segs):,}  links: {len(links):,}  needs_review: {n_review:,}  "
-          f"unresolved_street: {n_unres:,}  conflicts: {len(conflict_seg_ids):,}  "
+          f"unresolved_street: {n_unres:,}  conflicts: {len(conflict_map):,}  "
           f"parity_unconfirmed: {len(parity_unconfirmed):,}")
     return 0
 

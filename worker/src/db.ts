@@ -57,8 +57,12 @@ export interface SegmentRow {
   street_name_lat: string | null;
   kind: string;
   parsed_json: string;
-  manual_json: string | null;
-  manual_locked: number;
+  /** Human override values (from segment_overrides; survive derived re-imports). */
+  ov_json: string | null;
+  ov_street_id: string | null;
+  ov_reviewed: number | null;
+  ov_street_name_cyr: string | null;
+  ov_street_name_lat: string | null;
   confidence: number;
   needs_review: number;
   parse_dialect: string | null;
@@ -68,7 +72,7 @@ export interface SegmentRow {
 }
 
 export function effectiveParsed(seg: SegmentRow): ParsedCoverage {
-  const raw = seg.manual_json ?? seg.parsed_json;
+  const raw = seg.ov_json ?? seg.parsed_json;
   try {
     const p = JSON.parse(raw) as Partial<ParsedCoverage>;
     return { intervals: p.intervals ?? [], singles: p.singles ?? [], whole: !!p.whole };
@@ -82,10 +86,12 @@ export async function listMunicipalities(db: D1Database): Promise<MunicipalityRo
     .prepare(
       `SELECT m.id, m.name_cyr, m.name_lat,
               COUNT(DISTINCT ps.id) AS station_count,
-              COALESCE(SUM(CASE WHEN cs.needs_review = 1 THEN 1 ELSE 0 END), 0) AS review_count
+              COALESCE(SUM(CASE WHEN cs.needs_review = 1 AND COALESCE(o.reviewed, 0) = 0
+                                THEN 1 ELSE 0 END), 0) AS review_count
          FROM municipalities m
          LEFT JOIN polling_stations ps ON ps.municipality_id = m.id
          LEFT JOIN coverage_segments cs ON cs.station_id = ps.id
+         LEFT JOIN segment_overrides o ON o.segment_id = cs.id
         WHERE m.parent_id IS NULL
         GROUP BY m.id
         ORDER BY m.name_lat`
@@ -103,12 +109,14 @@ export async function listStations(db: D1Database, muniId: string) {
   const { results } = await db
     .prepare(
       `SELECT ps.id, ps.number, ps.name_cyr, ps.name_lat, ps.is_amendment,
-              COUNT(cs.id) AS seg_count,
-              COALESCE(SUM(cs.needs_review), 0) AS review_count,
+              COUNT(DISTINCT cs.id) AS seg_count,
+              COALESCE(SUM(CASE WHEN cs.needs_review = 1 AND COALESCE(o.reviewed, 0) = 0
+                                THEN 1 ELSE 0 END), 0) AS review_count,
               CASE WHEN p.station_id IS NULL THEN 0 ELSE 1 END AS has_polygon,
               COALESCE(st.reviewed, 0) AS reviewed, COALESCE(st.dirty, 0) AS dirty
          FROM polling_stations ps
          LEFT JOIN coverage_segments cs ON cs.station_id = ps.id
+         LEFT JOIN segment_overrides o ON o.segment_id = cs.id
          LEFT JOIN polygons p ON p.station_id = ps.id
          LEFT JOIN station_status st ON st.station_id = ps.id
         WHERE ps.municipality_id = ?
@@ -127,9 +135,14 @@ export async function getStation(db: D1Database, id: number) {
 export async function getSegments(db: D1Database, stationId: number): Promise<SegmentRow[]> {
   const { results } = await db
     .prepare(
-      `SELECT cs.*, s.name_cyr AS street_name_cyr, s.name_lat AS street_name_lat
+      `SELECT cs.*, s.name_cyr AS street_name_cyr, s.name_lat AS street_name_lat,
+              o.manual_json AS ov_json, o.manual_street_id AS ov_street_id,
+              o.reviewed AS ov_reviewed,
+              ms.name_cyr AS ov_street_name_cyr, ms.name_lat AS ov_street_name_lat
          FROM coverage_segments cs
          LEFT JOIN streets s ON s.id = cs.street_id
+         LEFT JOIN segment_overrides o ON o.segment_id = cs.id
+         LEFT JOIN streets ms ON ms.id = o.manual_street_id
         WHERE cs.station_id = ?
         ORDER BY cs.id`
     )
@@ -158,7 +171,8 @@ interface AddrRow {
  *  (manual override || parsed), so edits are reflected immediately on the map. */
 export async function pointsForStation(db: D1Database, stationId: number) {
   const segs = await getSegments(db, stationId);
-  const streetIds = [...new Set(segs.map((s) => s.street_id).filter((x): x is string => !!x))];
+  const effStreet = (s: SegmentRow) => s.ov_street_id ?? s.street_id;
+  const streetIds = [...new Set(segs.map(effStreet).filter((x): x is string => !!x))];
   if (streetIds.length === 0) return { type: "FeatureCollection", features: [] };
 
   const placeholders = streetIds.map(() => "?").join(",");
@@ -180,10 +194,11 @@ export async function pointsForStation(db: D1Database, stationId: number) {
   const seen = new Set<number>();
   const features: unknown[] = [];
   for (const seg of segs) {
-    if (!seg.street_id) continue;
+    const sid = effStreet(seg);
+    if (!sid) continue;
     const parsed = effectiveParsed(seg);
     const singles = new Set(parsed.singles.map(([n, s]) => `${n}|${s}`));
-    for (const a of byStreet.get(seg.street_id) ?? []) {
+    for (const a of byStreet.get(sid) ?? []) {
       if (a.house_num === null || seen.has(a.id)) continue;
       const inRange = parsed.intervals.some((iv) => houseInInterval(a.house_num!, iv));
       // Exact (num+suffix) match, or a bare number implying its suffixed variants
@@ -219,6 +234,26 @@ export async function allMuniPolygons(db: D1Database, muniId: string) {
     )
     .bind(muniId)
     .all<{ station_id: number; number: number; name_cyr: string; name_lat: string; geojson: string }>();
+  return results ?? [];
+}
+
+/** Search register streets within a station's municipality, for the manual street picker.
+ *  Matches the normalized Cyrillic key and (ASCII-case-insensitively) the Latin name. */
+export async function searchStreets(db: D1Database, stationId: number, q: string) {
+  const st = await db.prepare("SELECT municipality_id FROM polling_stations WHERE id = ?")
+    .bind(stationId).first<{ municipality_id: string }>();
+  if (!st) return [];
+  const needle = `%${q.toUpperCase()}%`;
+  const { results } = await db
+    .prepare(
+      `SELECT s.id, s.name_cyr, s.name_lat, st.name_cyr AS settlement_cyr, st.name_lat AS settlement_lat
+         FROM streets s JOIN settlements st ON st.id = s.settlement_id
+        WHERE st.municipality_id = ?
+          AND (s.name_norm LIKE ? OR UPPER(s.name_lat) LIKE ?)
+        ORDER BY st.name_cyr, s.name_cyr LIMIT 30`
+    )
+    .bind(st.municipality_id, needle, needle)
+    .all<{ id: string; name_cyr: string; name_lat: string; settlement_cyr: string; settlement_lat: string }>();
   return results ?? [];
 }
 

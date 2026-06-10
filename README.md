@@ -96,6 +96,19 @@ fresh pipeline pass without touching the 2.48 M addresses.
 > Note: this `wrangler` (v4) has no `d1 import`; use `d1 execute --file`. The SQL is
 > batched and capped at ~50 KB per statement to stay under D1's statement-size limit.
 
+### Review → recompute loop
+
+Reviewer edits (number/parity changes, manual street assignments, "mark reviewed") are
+stored in the `segment_overrides` D1 table — they survive data re-imports and reflect
+immediately in the live map points. To fold them into the stored **polygons**:
+
+```bash
+pipeline/recompute.sh        # fetch overrides -> stage04-06 -> import derived to remote D1
+```
+
+Flags: `--no-fetch` (reuse existing `artifacts/overrides.json`), `--no-import` (rebuild
+locally only). Takes ~5 minutes; touches only the derived tables, so it is safe to re-run.
+
 ### Review UI
 
 `/` municipalities → `/m/:id` stations (worst-first by `needs_review`) → `/s/:id` station

@@ -78,31 +78,40 @@ def _buffered_by_station(xy: np.ndarray, station_ids: np.ndarray, result: dict[i
         result.setdefault(int(sid), []).append(pts.buffer(config.POLYGON_CLIP_BUFFER_M, quad_segs=2))
 
 
-def cells_for_settlement(xy: np.ndarray, station_ids: np.ndarray) -> dict[int, list[Polygon]]:
+def cells_for_settlement(xy: np.ndarray, station_ids: np.ndarray,
+                         halo_xy: np.ndarray | None = None) -> dict[int, list[Polygon]]:
     """Return {station_id: [cell polygons]} for one settlement (UTM coords).
 
-    Each Voronoi cell is capped to a buffer around ITS OWN generating point, so the
-    polygon hugs the addresses instead of sprawling out to the settlement edge. Capping
-    per cell (cell ∩ one small octagon) stays cheap; clipping to a settlement-wide
-    point-cloud boundary does not (that geometry has thousands of vertices)."""
+    `halo_xy` are nearby points from NEIGHBORING settlements: they participate in the
+    tessellation purely as boundary constraints (their cells are discarded), so a cell at
+    the settlement edge cannot grow across the boundary into a neighbor's streets — the
+    per-settlement partition is otherwise blind to them (e.g. a Zvezdara station's cells
+    sprawled into Vračar across Bulevar kralja Aleksandra).
+
+    Each cell is capped to a buffer around ITS OWN generating point, so the polygon hugs
+    the addresses instead of sprawling out to the settlement edge. Capping per cell
+    (cell ∩ one small octagon) stays cheap."""
     result: dict[int, list[Polygon]] = {}
 
     # Voronoi needs >=4 non-collinear points; otherwise fall back to buffered points.
     if len(xy) < 4:
         _buffered_by_station(xy, station_ids, result)
         return result
+
+    n_own = len(xy)
+    pts = np.vstack([xy, halo_xy]) if halo_xy is not None and len(halo_xy) else xy
     try:
-        vor = Voronoi(xy)
+        vor = Voronoi(pts)
     except QhullError:
         _buffered_by_station(xy, station_ids, result)
         return result
 
     R = config.POLYGON_CLIP_BUFFER_M
-    radius = float(np.ptp(xy, axis=0).max()) * 2 + R
+    radius = float(np.ptp(pts, axis=0).max()) * 2 + R
     regions, vertices = voronoi_finite_polygons_2d(vor, radius)
-    for i, region in enumerate(regions):
-        cap = Point(xy[i]).buffer(R, quad_segs=2)
-        poly = Polygon(vertices[region]).intersection(cap)
+    for i in range(n_own):  # halo cells (i >= n_own) are constraints only — discarded
+        cap = Point(pts[i]).buffer(R, quad_segs=2)
+        poly = Polygon(vertices[regions[i]]).intersection(cap)
         if poly.is_empty:
             continue
         result.setdefault(int(station_ids[i]), []).append(poly)
@@ -122,19 +131,54 @@ def main() -> int:
         pl.col("station_id").fill_null(UNASSIGNED)
     )
 
+    # Global arrays + coarse spatial grid for halo lookup. Bucket size >= the cell cap, so
+    # own-bucket + 8 neighbors covers every foreign point a boundary cell could touch.
+    X = df["x"].to_numpy()
+    Y = df["y"].to_numpy()
+    sett_codes, SETT = np.unique(df["settlement_id"].to_numpy(), return_inverse=True)
+    B = max(256.0, config.POLYGON_CLIP_BUFFER_M)
+    bx = np.floor(X / B).astype(np.int64)
+    by = np.floor(Y / B).astype(np.int64)
+    bucket_of = bx * 10_000_019 + by
+    buckets: dict[int, list[int]] = {}
+    for i, k in enumerate(bucket_of):
+        buckets.setdefault(int(k), []).append(i)
+
+    idx_by_sett: dict[int, np.ndarray] = {
+        int(c): np.flatnonzero(SETT == c) for c in range(len(sett_codes))
+    }
+
     # Accumulate cells per station across settlements.
     station_cells: dict[int, list] = {}
-    settlements = df["settlement_id"].unique().to_list()
-    for set_id in settlements:
-        sub = df.filter(pl.col("settlement_id") == set_id)
-        xy = np.column_stack([sub["x"].to_numpy(), sub["y"].to_numpy()])
-        sids = sub["station_id"].to_numpy()
-        if len(xy) == 0:
+    sids_all = df["station_id"].to_numpy()
+    for code, own_idx in idx_by_sett.items():
+        if len(own_idx) == 0:
             continue
-        for sid, cells in cells_for_settlement(xy, sids).items():
+        xy = np.column_stack([X[own_idx], Y[own_idx]])
+        sids = sids_all[own_idx]
+
+        # Halo: foreign points in own buckets + their 8 neighbors (boundary constraints).
+        halo_xy = None
+        if len(own_idx) >= 4:
+            cand: list[int] = []
+            seen: set[int] = set()
+            for b in {(int(bx[i]), int(by[i])) for i in own_idx}:
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        k = (b[0] + dx) * 10_000_019 + (b[1] + dy)
+                        if k not in seen:
+                            seen.add(k)
+                            cand.extend(buckets.get(k, ()))
+            cand_arr = np.asarray(cand, dtype=np.int64)
+            foreign = cand_arr[SETT[cand_arr] != code]
+            if len(foreign):
+                halo_xy = np.column_stack([X[foreign], Y[foreign]])
+
+        for sid, cells in cells_for_settlement(xy, sids, halo_xy).items():
             if sid == UNASSIGNED:
                 continue
             station_cells.setdefault(sid, []).extend(cells)
+    settlements = sett_codes  # for the summary line
 
     rows: list[dict] = []
     now = datetime.now(timezone.utc).isoformat()

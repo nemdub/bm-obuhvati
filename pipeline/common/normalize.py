@@ -23,6 +23,27 @@ _STREET_ABBREV = {
 
 _WS_RE = re.compile(r"\s+")
 _STREET_LABEL_RE = re.compile(r"^\s*УЛИЦА\s*:?\s*", re.IGNORECASE)
+# "Др" (doctor) abbreviation: docs write "Др Ђорђа Лазића", the register spells out
+# "ДОКТОРА ЂОРЂА ЛАЗИЋА". Expanded on both sides so they converge.
+_DR_RE = re.compile(r"\bДР\b")
+# Roman numerals (Latin letters, values 1-39 — street ordinals like VII, XII): docs and the
+# register disagree on Roman vs Arabic ("XII војвођанске..." vs "12.ВОЈВОЂАНСКЕ...",
+# and the inverse "8. војвођанске" vs "VIII ВОЈВОЂАНСКА"). Normalized to Arabic on both
+# sides. Strict 1-39 pattern so Latin-lettered tokens that aren't numerals never convert.
+_ROMAN_RE = re.compile(r"\b(X{0,3})(IX|IV|V?I{0,3})\b")
+_ROMAN_VAL = {"I": 1, "V": 5, "X": 10}
+
+
+def _roman_to_arabic(m: re.Match) -> str:
+    s = m.group(0)
+    if not s:
+        return s
+    total, prev = 0, 0
+    for ch in reversed(s):
+        v = _ROMAN_VAL[ch]
+        total = total - v if v < prev else total + v
+        prev = max(prev, v)
+    return str(total)
 # Latin letters that may appear in suffixes coming from the register's Latin column.
 _HAS_LATIN_RE = re.compile(r"[A-Za-zĐŽĆČŠđžćčš]")
 
@@ -40,8 +61,59 @@ def normalize_street(name: str) -> str:
         s = s.replace(abbr, full)
     # Keep Cyrillic/Latin letters, digits and spaces; drop other punctuation.
     s = re.sub(r"[^0-9A-Za-zА-Яа-яЂЃЄЅІЇЈЉЊЋЌЎЏђѓєѕіїјљњћќўџ\s]", " ", s)
+    s = _DR_RE.sub("ДОКТОРА", s)
+    s = _ROMAN_RE.sub(_roman_to_arabic, s)
     s = _WS_RE.sub(" ", s).strip()
     return s
+
+
+_CYR_VOWELS = set("АЕИОУ")
+_MAX_GEN_VARIANTS = 16
+
+
+def _word_case_options(w: str) -> list[str]:
+    """Declension options for one word of a street name (the word itself always first).
+
+    Serbian street names mix nominative and genitive across sources, and Hungarian
+    names decline with the stem kept: А-stems НИКОЛА<->НИКОЛЕ; consonant ВУК->ВУКА;
+    О-final ДАНКО->ДАНКОА (Hungarian style) or БРАНКО->БРАНКА (Serbian style);
+    Е-final ЂОРЂЕ->ЂОРЂА."""
+    if len(w) < 4 or any(ch.isdigit() for ch in w):
+        return [w]
+    last = w[-1]
+    if last == "А":
+        return [w, w[:-1] + "Е"]
+    if last == "О":
+        return [w, w + "А", w[:-1] + "А"]
+    if last == "Е":
+        return [w, w[:-1] + "А"]
+    if last not in _CYR_VOWELS and last.isalpha():
+        return [w, w + "А"]
+    return [w]
+
+
+def genitive_variants(norm: str) -> list[str]:
+    """All declension variants of a normalized street name (excluding the name itself),
+    capped to keep combinatorics bounded. Used only as ALTERNATE settlement-scoped keys
+    (they never replace literal names, never municipality-wide)."""
+    from itertools import product
+
+    options = [_word_case_options(w) for w in norm.split()]
+    out: list[str] = []
+    for combo in product(*options):
+        v = " ".join(combo)
+        if v != norm:
+            out.append(v)
+            if len(out) >= _MAX_GEN_VARIANTS:
+                break
+    return out
+
+
+def genitive_variant(norm: str) -> str | None:
+    """First (most common) declension variant, or None. Kept for callers that only need
+    the primary А<->Е / consonant+А form."""
+    v = genitive_variants(norm)
+    return v[0] if v else None
 
 
 @dataclass(frozen=True)

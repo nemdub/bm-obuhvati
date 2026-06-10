@@ -112,7 +112,7 @@ export function stationsView(
         ${s.is_amendment ? html`<span class="badge amend">${t("amendment")}</span>` : ""}</td>
       <td class="num">${s.seg_count}</td>
       <td class="num">${s.review_count > 0 ? html`<span class="badge warn">${s.review_count}</span>` : "0"}</td>
-      <td class="num">${s.has_polygon ? "▰" : "—"}</td>
+      <td class="num">${s.has_polygon ? html`<span class="ok-mark">✓</span>` : html`<span class="badge warn">${t("none")}</span>`}</td>
       <td class="num">${s.reviewed ? html`<span class="badge ok">✓</span>` : ""}${s.dirty ? html`<span class="badge dirty">⟳</span>` : ""}</td>
     </tr>`
   );
@@ -188,6 +188,7 @@ function labelBundle(script: Script) {
     noPointsForStreet: t("noPointsForStreet"),
     parityAll: t("parityAll"), parityOdd: t("parityOdd"), parityEven: t("parityEven"),
     reviewReason: t("reviewReason"),
+    changeStreet: t("changeStreet"), searchStreet: t("searchStreet"), manualStreetSet: t("manualStreetSet"),
     polygon: t("polygon"), noPolygon: t("noPolygon"), stale: t("stale"), recomputeQueued: t("recomputeQueued"),
     source: t("source"), base: t("base"), amendment: t("amendment"),
   };

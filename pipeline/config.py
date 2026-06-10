@@ -30,6 +30,7 @@ AMENDMENTS_PARQUET = ARTIFACTS_DIR / "amendments.parquet"
 LINKS_PARQUET = ARTIFACTS_DIR / "links.parquet"
 POLYGONS_PARQUET = ARTIFACTS_DIR / "polygons.parquet"
 DOC_MUNI_MAP = ARTIFACTS_DIR / "doc_municipality_map.csv"  # filename -> municipality (review me)
+OVERRIDES_JSON = ARTIFACTS_DIR / "overrides.json"  # reviewer edits exported from D1 (fetch_overrides.sh)
 SQLITE_OUT = ARTIFACTS_DIR / "bm.sqlite"
 
 # ── Coordinate reference systems ────────────────────────────────────────────
@@ -52,6 +53,15 @@ STREET_FUZZY_MIN = 90       # rapidfuzz score below which a street match needs r
 # Auto-matching in stage02 handles most files; add corrections here when the
 # fuzzy match is wrong. Keys are the on-disk filenames; values are the register
 # opstina_ime_lat to bind to.
+# ── Street aliases ──────────────────────────────────────────────────────────
+# Documents sometimes use a different (older/colloquial) name than the register's
+# official one — too different for safe fuzzy matching. Hand-maintained:
+# (municipality_id, doc street name) -> register street name. Both sides are
+# normalize_street()-ed at lookup, so any spelling/case works here.
+STREET_ALIASES: dict[tuple[str, str], str] = {
+    ("80381", "Пинкијева"): "Хероја Пинкија",  # Sombor
+}
+
 DOC_MUNI_OVERRIDES: dict[str, str] = {
     # "Palilula" is ambiguous (Belgrade + Niš both have a Палилула); the fuzzy match is
     # unstable. These two docs are Belgrade Palilula; Niš's Palilula comes from the Niš

@@ -34,6 +34,13 @@ table.list tr:last-child td { border-bottom: none; }
 th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 th.sortable:hover { color: var(--ink); }
 th.sortable .arrow { font-size: 10px; color: var(--blue); }
+.ok-mark { color: var(--ok); font-weight: 700; }
+.street-pick { margin: 6px 0; }
+.street-search { width: 100%; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; margin-top: 4px; }
+.street-results { border: 1px solid var(--line); border-radius: 6px; max-height: 180px; overflow: auto; background: #fff; }
+.street-results:empty { display: none; }
+.street-item { padding: 5px 8px; cursor: pointer; font-size: 13px; }
+.street-item:hover { background: #eef4fb; }
 tr.city-head td { font-weight: 700; background: #f1f4f7; }
 tr.city-child td:first-child { padding-left: 30px; }
 

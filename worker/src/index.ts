@@ -4,7 +4,7 @@ import { tr } from "./translit";
 import { REVIEW_REASONS } from "./i18n";
 import {
   listMunicipalities, getMunicipality, listStations, getStation, getSegments,
-  getPolygon, pointsForStation, muniPolygons, allMuniPolygons, effectiveParsed,
+  getPolygon, pointsForStation, muniPolygons, allMuniPolygons, effectiveParsed, searchStreets,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
 
@@ -46,23 +46,35 @@ app.get("/api/s/:id/segments", async (c) => {
     segs.map((s) => ({
       id: s.id,
       street_raw: tr(s.street_raw, script),
-      street_name: s.street_name_cyr ? tr(s.street_name_cyr, script) : null,
-      street_resolved: !!s.street_id,
+      street_name: s.ov_street_name_cyr
+        ? tr(s.ov_street_name_cyr, script)
+        : s.street_name_cyr ? tr(s.street_name_cyr, script) : null,
+      street_resolved: !!(s.ov_street_id ?? s.street_id),
+      manual_street: !!s.ov_street_id,
+      manual_street_id: s.ov_street_id,
       kind: s.kind,
       parsed: effectiveParsed(s),
-      manual_locked: s.manual_locked,
+      manual_locked: s.ov_json != null || s.ov_street_id != null ? 1 : 0,
       confidence: s.confidence,
-      needs_review: s.needs_review,
+      needs_review: s.needs_review && !s.ov_reviewed ? 1 : 0,
       review_reasons: (s.review_reason ?? "")
         .split(",")
         .filter(Boolean)
         .map((code) => {
-          let text = tr(REVIEW_REASONS[code] ?? code, script);
+          // Codes may carry a parameter after ':' (e.g. "conflict:7|12" = opposing station numbers).
+          const [base, param] = code.split(":");
+          let text = tr(REVIEW_REASONS[base] ?? base, script);
           // For name-based matches, spell out document spelling -> matched register name
           // (the card title shows the resolved name, so the discrepancy isn't otherwise visible).
-          if ((code === "fuzzy" || code === "muni_fallback") && s.street_id) {
+          if ((base === "fuzzy" || base === "muni_fallback" || base === "alias") && s.street_id) {
             const matched = (script === "lat" ? s.street_name_lat : s.street_name_cyr) ?? "";
             text += `: „${tr(s.street_raw, script)}“ → „${matched}“`;
+          }
+          if (base === "conflict" && param) {
+            text += ` (${tr("бр.", script)} ${param.split("|").join(", ")})`;
+          }
+          if (base === "ambiguous" && param) {
+            text += `: ${tr(param.split("|").join(", "), script)}`;
           }
           return text;
         }),
@@ -74,19 +86,26 @@ app.get("/api/s/:id/segments", async (c) => {
 
 app.put("/api/segments/:id", async (c) => {
   const segId = Number(c.req.param("id"));
-  const body = await c.req.json<{ intervals?: [number, number][]; singles?: [number, string][]; whole?: boolean; reviewed?: boolean }>();
+  const body = await c.req.json<{
+    intervals?: [number, number][]; singles?: [number, string][]; whole?: boolean;
+    reviewed?: boolean; street_id?: string | null;
+  }>();
   const manual = JSON.stringify({
     intervals: body.intervals ?? [],
     singles: body.singles ?? [],
     whole: !!body.whole,
   });
-  const reviewClause = body.reviewed ? ", needs_review = 0" : "";
   const seg = await c.env.DB.prepare("SELECT station_id FROM coverage_segments WHERE id = ?")
     .bind(segId).first<{ station_id: number }>();
   if (!seg) return c.notFound();
+  // Human edits live in segment_overrides (survives derived re-imports).
   await c.env.DB.prepare(
-    `UPDATE coverage_segments SET manual_json = ?, manual_locked = 1${reviewClause} WHERE id = ?`
-  ).bind(manual, segId).run();
+    `INSERT INTO segment_overrides (segment_id, manual_json, manual_street_id, reviewed, updated_at)
+     VALUES (?1, ?2, ?3, ?4, datetime('now'))
+     ON CONFLICT(segment_id) DO UPDATE SET
+       manual_json = ?2, manual_street_id = ?3,
+       reviewed = MAX(segment_overrides.reviewed, ?4), updated_at = datetime('now')`
+  ).bind(segId, manual, body.street_id ?? null, body.reviewed ? 1 : 0).run();
   await markDirty(c.env.DB, seg.station_id);
   return c.json({ ok: true });
 });
@@ -96,11 +115,21 @@ app.delete("/api/segments/:id/manual", async (c) => {
   const seg = await c.env.DB.prepare("SELECT station_id FROM coverage_segments WHERE id = ?")
     .bind(segId).first<{ station_id: number }>();
   if (!seg) return c.notFound();
-  await c.env.DB.prepare(
-    "UPDATE coverage_segments SET manual_json = NULL, manual_locked = 0 WHERE id = ?"
-  ).bind(segId).run();
+  await c.env.DB.prepare("DELETE FROM segment_overrides WHERE segment_id = ?").bind(segId).run();
   await markDirty(c.env.DB, seg.station_id);
   return c.json({ ok: true });
+});
+
+app.get("/api/s/:id/streets", async (c) => {
+  const script = getScript(c);
+  const q = (c.req.query("q") ?? "").trim();
+  if (q.length < 2) return c.json([]);
+  const rows = await searchStreets(c.env.DB, Number(c.req.param("id")), q);
+  return c.json(rows.map((r) => ({
+    id: r.id,
+    name: script === "lat" ? r.name_lat : r.name_cyr,
+    settlement: script === "lat" ? r.settlement_lat : r.settlement_cyr,
+  })));
 });
 
 app.get("/api/m/:id/polygons.geojson", async (c) => {

@@ -63,6 +63,17 @@ def interval_parity(lo: int, hi: int) -> str:
     return "all"
 
 
+# Block designations from housing estates: a short letter prefix + number ("А-21",
+# "Т-8-Т-10", "Е1-Е-7/I"). These are an addressing system separate from the register's
+# plain house numbers and cannot be auto-mapped — they are kept as unknown_tokens (->
+# review) but must NOT be glued into the street name.
+_BLOCK_RE = re.compile(r"^[A-Za-zА-Яа-яЂ-џ]{1,2}-?\d\S*$")
+
+
+def is_block_token(w: str) -> bool:
+    return bool(_BLOCK_RE.match(w.strip(".,;")))
+
+
 def is_house_token(w: str) -> bool:
     """A house-number token starts with a digit and is not an ordinal ('20.', '8.')."""
     if not w or not w[0].isdigit():
@@ -70,6 +81,11 @@ def is_house_token(w: str) -> bool:
     if _ORDINAL.match(w):
         return False
     return True
+
+
+def is_number_side(w: str) -> bool:
+    """Token belongs to the number side of a street clause (house number or block tag)."""
+    return is_house_token(w) or is_block_token(w)
 
 
 def parse_number_token(tok: str, seg: Segment) -> None:
@@ -140,10 +156,10 @@ def parse_compact(text: str, settlement: str = "") -> list[Segment]:
         lead: list[str] = []
         while i < len(words):
             w = words[i]
-            if is_house_token(w):
+            if is_number_side(w):
                 lead.append(w)
                 i += 1
-            elif w == "и" and i + 1 < len(words) and is_house_token(words[i + 1]):
+            elif w == "и" and i + 1 < len(words) and is_number_side(words[i + 1]):
                 i += 1
             else:
                 break
@@ -158,7 +174,7 @@ def parse_compact(text: str, settlement: str = "") -> list[Segment]:
 
         for piece in _split_on_connector(rest):
             j = 0
-            while j < len(piece) and not is_house_token(piece[j]):
+            while j < len(piece) and not is_number_side(piece[j]):
                 j += 1
             name_words, num_words = piece[:j], piece[j:]
             if not name_words:

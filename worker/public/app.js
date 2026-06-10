@@ -158,6 +158,54 @@
       body.appendChild(note);
     }
 
+    // Street picker: lets the reviewer (re)assign the register street — crucial when the
+    // street is unresolved or matched to the wrong one. chosenStreet rides along on save.
+    let chosenStreet = null; // street id picked in this card session
+    const sp = document.createElement("div");
+    sp.className = "street-pick";
+    const spBtn = mkBtn(L_.changeStreet, "mini add", () => {
+      spBox.style.display = spBox.style.display === "none" ? "block" : "none";
+      if (spBox.style.display === "block") spInput.focus();
+    });
+    const spBox = document.createElement("div");
+    spBox.style.display = seg.street_resolved ? "none" : "block"; // open by default when unresolved
+    const spInput = document.createElement("input");
+    spInput.type = "text";
+    spInput.placeholder = L_.searchStreet;
+    spInput.className = "street-search";
+    const spList = document.createElement("div");
+    spList.className = "street-results";
+    let spTimer = null;
+    spInput.addEventListener("input", () => {
+      clearTimeout(spTimer);
+      spTimer = setTimeout(async () => {
+        const q = spInput.value.trim();
+        if (q.length < 2) { spList.innerHTML = ""; return; }
+        const rows = await fetch(api(`/streets?q=${encodeURIComponent(q)}`)).then((r) => r.json());
+        spList.innerHTML = "";
+        rows.forEach((r) => {
+          const item = document.createElement("div");
+          item.className = "street-item";
+          item.textContent = `${r.name} (${r.settlement})`;
+          item.onclick = () => {
+            chosenStreet = r.id;
+            spInput.value = `${r.name} (${r.settlement})`;
+            spList.innerHTML = "";
+          };
+          spList.appendChild(item);
+        });
+      }, 250);
+    });
+    if (seg.manual_street) {
+      const note = document.createElement("span");
+      note.className = "badge ok";
+      note.textContent = L_.manualStreetSet;
+      sp.appendChild(note);
+    }
+    spBox.append(spInput, spList);
+    sp.append(spBtn, spBox);
+    body.appendChild(sp);
+
     // whole-street toggle
     const wholeLbl = document.createElement("label");
     wholeLbl.className = "whole";
@@ -199,18 +247,20 @@
     // actions
     const actions = document.createElement("div");
     actions.className = "seg-actions";
+    const payload = (reviewedFlag) => JSON.stringify({
+      ...collect(whole, ivList, sgList, reviewedFlag),
+      street_id: chosenStreet ?? seg.manual_street_id ?? null, // keep prior manual street
+    });
     const save = mkBtn(L_.save, "btn primary", async () => {
       await fetch(`/api/segments/${seg.id}`, {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(collect(whole, ivList, sgList, false)),
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: payload(false),
       });
       flash(actions, L_.saved);
       await reload();
     });
     const reviewed = mkBtn(L_.markReviewed, "btn", async () => {
       await fetch(`/api/segments/${seg.id}`, {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(collect(whole, ivList, sgList, true)),
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: payload(true),
       });
       await reload();
     });
