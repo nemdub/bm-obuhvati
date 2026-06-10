@@ -7,7 +7,6 @@ import {
   getPolygon, pointsForStation, muniPolygons, allMuniPolygons, effectiveParsed,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
-import { srLatinCompare } from "./collate";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -23,11 +22,8 @@ app.use("*", async (c, next) => {
 });
 
 // ── Pages ───────────────────────────────────────────────────────────────────
-app.get("/", async (c) => {
-  const munis = await listMunicipalities(c.env.DB);
-  munis.sort((a, b) => srLatinCompare(a.name_lat, b.name_lat)); // Serbian abeceda order
-  return c.html(municipalitiesView(c, munis));
-});
+// Serbian abeceda ordering + Belgrade nesting are handled in the view.
+app.get("/", async (c) => c.html(municipalitiesView(c, await listMunicipalities(c.env.DB))));
 
 app.get("/m/:id", async (c) => {
   const muni = await getMunicipality(c.env.DB, c.req.param("id"));

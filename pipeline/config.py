@@ -52,7 +52,65 @@ STREET_FUZZY_MIN = 90       # rapidfuzz score below which a street match needs r
 # Auto-matching in stage02 handles most files; add corrections here when the
 # fuzzy match is wrong. Keys are the on-disk filenames; values are the register
 # opstina_ime_lat to bind to.
-DOC_MUNI_OVERRIDES: dict[str, str] = {}
+DOC_MUNI_OVERRIDES: dict[str, str] = {
+    # "Palilula" is ambiguous (Belgrade + Niš both have a Палилула); the fuzzy match is
+    # unstable. These two docs are Belgrade Palilula; Niš's Palilula comes from the Niš
+    # sectioned doc. Without this, the Belgrade stations leak into Niš Palilula.
+    "Palilula-glasacka-mesta.doc": "PALILULA (BEOGRAD)",
+    "Palilula.docx": "PALILULA (BEOGRAD)",
+}
+
+
+# ── City municipality groups ────────────────────────────────────────────────
+# The address register splits big cities into city-municipalities (each its own
+# opstina id), but RIK publishes ONE polling-station document per city. Group the
+# members under a representative so street/address matching spans the whole city and
+# the members don't show as separate 0-station entries. `rep` is the opstina the
+# document mapped to; `name_*` overrides the rep's display name where needed.
+# Scope-merge groups: NON-sectioned city docs where the member town has no stations of its
+# own (numbering is continuous). The member's addresses are matched by the rep's stations,
+# and the member is hidden in the UI (parent_id).
+CITY_GROUPS: list[dict] = [
+    {"rep": "70432", "members": ["71358"]},  # Vranje + Vranjska Banja
+    {"rep": "70947", "members": ["71340"]},  # Požarevac + Kostolac
+    {"rep": "71145", "members": ["71366"]},  # Užice + Sevojno
+]
+
+# Sectioned docs: one document covering several city-municipalities, each in its own
+# "ГРАДСКА ОПШТИНА <name>" section with numbering restarting per section. Each station is
+# assigned to its section's opstina (so numbers don't collide); the members are nested in
+# the UI under the city (see the Worker's CITY_DISPLAY), not hidden.
+SECTIONED_DOCS: dict[str, dict[str, str]] = {
+    "Nis-glasacka-mesta.doc": {  # City of Niš — 5 city-municipalities
+        "МЕДИЈАНА": "71331",
+        "ПАЛИЛУЛА": "71323",
+        "ПАНТЕЛЕЈ": "71307",
+        "ЦРВЕНИ КРСТ": "71315",
+        "НИШКА БАЊА": "71285",
+    },
+}
+
+_MEMBER_TO_REP: dict[str, str] = {}
+_REP_NAME: dict[str, tuple[str, str]] = {}
+for _g in CITY_GROUPS:
+    for _m in _g["members"]:
+        _MEMBER_TO_REP[_m] = _g["rep"]
+    if "name_cyr" in _g:
+        _REP_NAME[_g["rep"]] = (_g["name_cyr"], _g["name_lat"])
+
+
+def group_rep(municipality_id: str) -> str:
+    """Representative opstina id for matching scope (members -> rep, others -> self)."""
+    return _MEMBER_TO_REP.get(municipality_id, municipality_id)
+
+
+def parent_of(municipality_id: str) -> str | None:
+    """Rep id for a grouped member (so it can be hidden in the UI), else None."""
+    return _MEMBER_TO_REP.get(municipality_id)
+
+
+def rep_name(municipality_id: str) -> tuple[str, str] | None:
+    return _REP_NAME.get(municipality_id)
 
 
 def ensure_artifacts() -> None:

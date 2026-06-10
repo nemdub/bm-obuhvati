@@ -37,3 +37,32 @@ export function srLatinCompare(a: string, b: string): number {
   const kb = srLatinKey(b);
   return ka < kb ? -1 : ka > kb ? 1 : 0;
 }
+
+/**
+ * Serbian Cyrillic (azbuka) collation. The letters Ђ, Ј, Љ, Њ, Ћ, Џ sit in a different
+ * Unicode block than basic Cyrillic, so code-point order is wrong; this ranks by azbuka:
+ *   а б в г д ђ е ж з и ј к л љ м н њ о п р с т ћ у ф х ц ч џ ш
+ * (љ, њ, џ are single code points in Cyrillic — no digraph handling needed).
+ */
+const AZBUKA = [
+  "а", "б", "в", "г", "д", "ђ", "е", "ж", "з", "и", "ј", "к", "л", "љ", "м",
+  "н", "њ", "о", "п", "р", "с", "т", "ћ", "у", "ф", "х", "ц", "ч", "џ", "ш",
+];
+const CYR_RANK = new Map<string, number>(AZBUKA.map((l, i) => [l, 10 + i]));
+
+function srCyrillicKey(input: string): string {
+  const s = input.toLowerCase();
+  const codes: number[] = [];
+  for (const ch of s) {
+    if (CYR_RANK.has(ch)) codes.push(CYR_RANK.get(ch)!);
+    else if (ch === " " || ch === "-" || ch === ".") codes.push(2);
+    else codes.push(200 + ch.charCodeAt(0));
+  }
+  return String.fromCharCode(...codes);
+}
+
+export function srCyrillicCompare(a: string, b: string): number {
+  const ka = srCyrillicKey(a);
+  const kb = srCyrillicKey(b);
+  return ka < kb ? -1 : ka > kb ? 1 : 0;
+}

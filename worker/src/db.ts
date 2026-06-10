@@ -86,6 +86,7 @@ export async function listMunicipalities(db: D1Database): Promise<MunicipalityRo
          FROM municipalities m
          LEFT JOIN polling_stations ps ON ps.municipality_id = m.id
          LEFT JOIN coverage_segments cs ON cs.station_id = ps.id
+        WHERE m.parent_id IS NULL
         GROUP BY m.id
         ORDER BY m.name_lat`
     )

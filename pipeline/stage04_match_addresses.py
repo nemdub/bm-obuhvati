@@ -45,14 +45,17 @@ def build_indexes():
     addresses = pl.read_parquet(config.ADDRESSES_PARQUET)
     stations = pl.read_parquet(config.STATIONS_PARQUET)
 
+    # Scope is keyed by the city-group representative so a city's single doc resolves
+    # streets/settlements across all its city-municipalities.
     sett_to_muni = dict(zip(settlements["id"], settlements["municipality_id"]))
     street_meta: dict[str, dict] = {}
     by_muni_norm: dict[str, dict[str, list[str]]] = {}
     by_sett_norm: dict[str, dict[str, list[str]]] = {}
     for sid, set_id, norm in zip(streets["id"], streets["settlement_id"], streets["name_norm"]):
         muni = sett_to_muni.get(set_id)
+        gmuni = config.group_rep(muni) if muni else muni
         street_meta[sid] = {"settlement_id": set_id, "municipality_id": muni, "name_norm": norm}
-        by_muni_norm.setdefault(muni, {}).setdefault(norm, []).append(sid)
+        by_muni_norm.setdefault(gmuni, {}).setdefault(norm, []).append(sid)
         by_sett_norm.setdefault(set_id, {}).setdefault(norm, []).append(sid)
 
     addr_by_street: dict[str, list[tuple[int, int | None, str]]] = {}
@@ -63,12 +66,13 @@ def build_indexes():
 
     settlements_by_muni: dict[str, list[tuple[str, str]]] = {}
     for sid, muni, name in zip(settlements["id"], settlements["municipality_id"], settlements["name_cyr"]):
-        settlements_by_muni.setdefault(muni, []).append((sid, normalize_street(name)))
+        settlements_by_muni.setdefault(config.group_rep(muni), []).append((sid, normalize_street(name)))
 
-    station_muni = dict(zip(stations["id"], stations["municipality_id"]))
+    # station scope = the group rep of the station's municipality.
+    station_muni = {sid: config.group_rep(m) for sid, m in zip(stations["id"], stations["municipality_id"])}
     station_settlement: dict[int, str | None] = {}
-    for sid, muni, addr in zip(stations["id"], stations["municipality_id"], stations["address_cyr"]):
-        station_settlement[sid] = resolve_settlement_from_address(addr, muni, settlements_by_muni)
+    for sid, addr in zip(stations["id"], stations["address_cyr"]):
+        station_settlement[sid] = resolve_settlement_from_address(addr, station_muni[sid], settlements_by_muni)
     return (street_meta, by_muni_norm, by_sett_norm, addr_by_street, settlements_by_muni,
             station_muni, station_settlement)
 

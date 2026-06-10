@@ -156,6 +156,16 @@ def main() -> int:
     print(f"  active addresses: {addr_full.height:,}  ({time.time()-t0:.1f}s)")
 
     munis, settlements, streets = build_reference_tables(addr_full)
+
+    # City-municipality groups: add parent_id (members point to their rep so the UI can
+    # hide them) and apply any rep display-name override.
+    mr = munis.to_dicts()
+    for r in mr:
+        r["parent_id"] = config.parent_of(r["id"])
+        nm = config.rep_name(r["id"])
+        if nm:
+            r["name_cyr"], r["name_lat"] = nm
+    munis = pl.DataFrame(mr, infer_schema_length=None)
     print(f"  municipalities: {munis.height:,}  settlements: {settlements.height:,}  streets: {streets.height:,}")
 
     addresses = addr_full.select(

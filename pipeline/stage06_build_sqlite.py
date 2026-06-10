@@ -30,7 +30,7 @@ MAX_STMT_BYTES = 50_000  # flush a statement before it grows past this (D1 state
 
 # table -> (parquet path, ordered columns)
 TABLES: dict[str, tuple[Path, list[str]]] = {
-    "municipalities": (config.MUNICIPALITIES_PARQUET, ["id", "name_cyr", "name_lat"]),
+    "municipalities": (config.MUNICIPALITIES_PARQUET, ["id", "name_cyr", "name_lat", "parent_id"]),
     "settlements": (config.SETTLEMENTS_PARQUET, ["id", "municipality_id", "name_cyr", "name_lat"]),
     "streets": (config.STREETS_PARQUET, ["id", "settlement_id", "name_cyr", "name_lat", "name_norm"]),
     "addresses": (config.ADDRESSES_PARQUET, [
@@ -123,6 +123,22 @@ def dump_group(present: dict[str, pl.DataFrame], insert_order: list[str],
     return counts
 
 
+def write_muni_meta(df: pl.DataFrame, out: Path) -> int:
+    """UPDATE statements syncing municipalities' display fields (name + parent_id) onto the
+    existing D1 rows. Municipalities can't be DELETE+reinserted (addresses FK), so renames
+    and grouping changes are applied via UPDATE."""
+    n = 0
+    with out.open("w", encoding="utf-8") as f:
+        for r in df.select("id", "name_cyr", "name_lat", "parent_id").iter_rows(named=True):
+            f.write(
+                f"UPDATE municipalities SET name_cyr={sql_literal(r['name_cyr'])}, "
+                f"name_lat={sql_literal(r['name_lat'])}, parent_id={sql_literal(r['parent_id'])} "
+                f"WHERE id={sql_literal(r['id'])};\n"
+            )
+            n += 1
+    return n
+
+
 def build_sqlite(present: dict[str, pl.DataFrame]) -> None:
     if config.SQLITE_OUT.exists():
         config.SQLITE_OUT.unlink()
@@ -165,6 +181,12 @@ def main() -> int:
         for t, n in counts.items():
             print(f"  {t}: {n:,} rows")
         print(f"  -> {path}")
+
+    # Municipality display-meta sync (names + parent_id) for already-loaded D1 rows.
+    if "municipalities" in present:
+        meta_path = config.ARTIFACTS_DIR / "import_muni_meta.sql"
+        n = write_muni_meta(present["municipalities"], meta_path)
+        print(f"  muni meta updates: {n} -> {meta_path}")
 
     # Addresses (insert-only, heavy).
     if "addresses" in present:

@@ -2,6 +2,7 @@ import { html, raw } from "hono/html";
 import type { Context } from "hono";
 import { makeT } from "./i18n";
 import { tr, type Script } from "./translit";
+import { srCyrillicCompare } from "./collate";
 import type { MunicipalityRow, StationRow } from "./db";
 
 export function getScript(c: Context): Script {
@@ -34,23 +35,65 @@ function layout(script: Script, titleText: string, body: unknown) {
 </html>`;
 }
 
+// Cities whose city-municipalities each have their own stations/coverage but are nested
+// under a city header in the list for navigation (display only — no scope/coverage change).
+const CITY_DISPLAY = [
+  {
+    cyr: "Београд", lat: "Beograd",
+    ids: new Set(["70181", "70254", "71293", "70114", "70092", "70203", "70157", "70165",
+      "70246", "70122", "70211", "70173", "70149", "70106", "70238", "70190", "70220"]),
+  },
+  {
+    cyr: "Ниш", lat: "Niš",
+    ids: new Set(["71331", "71323", "71307", "71315", "71285"]), // Medijana, Palilula(Niš), Pantelej, Crveni krst, Niška Banja
+  },
+];
+const GROUPED_IDS = new Set(CITY_DISPLAY.flatMap((c) => [...c.ids]));
+
+function muniRow(m: MunicipalityRow, script: Script, indent = false) {
+  return html`<tr class="${indent ? "city-child" : ""}">
+    <td><a href="/m/${m.id}">${tr(m.name_cyr, script)}</a></td>
+    <td class="num">${m.station_count}</td>
+    <td class="num">${m.review_count > 0 ? html`<span class="badge warn">${m.review_count}</span>` : "0"}</td>
+  </tr>`;
+}
+
 export function municipalitiesView(c: Context, munis: MunicipalityRow[]) {
   const script = getScript(c);
   const t = makeT(script);
-  const rows = munis.map(
-    (m) => html`<tr>
-      <td><a href="/m/${m.id}">${tr(m.name_cyr, script)}</a></td>
-      <td class="num">${m.station_count}</td>
-      <td class="num">${m.review_count > 0 ? html`<span class="badge warn">${m.review_count}</span>` : "0"}</td>
-    </tr>`
-  );
+
+  // Each entry is a standalone municipality or a nested city group; all sorted together by
+  // Serbian Cyrillic azbuka (a city group sorts at its city name).
+  type Entry = { sortName: string; html: unknown };
+  const entries: Entry[] = munis
+    .filter((m) => !GROUPED_IDS.has(m.id))
+    .map((m) => ({ sortName: m.name_cyr, html: muniRow(m, script) }));
+
+  for (const city of CITY_DISPLAY) {
+    const members = munis.filter((m) => city.ids.has(m.id));
+    if (!members.length) continue;
+    members.sort((a, b) => srCyrillicCompare(a.name_cyr, b.name_cyr));
+    const stations = members.reduce((s, m) => s + m.station_count, 0);
+    const review = members.reduce((s, m) => s + m.review_count, 0);
+    entries.push({
+      sortName: city.cyr,
+      html: html`<tr class="city-head">
+          <td>${script === "lat" ? city.lat : city.cyr}</td>
+          <td class="num">${stations}</td>
+          <td class="num">${review > 0 ? html`<span class="badge warn">${review}</span>` : "0"}</td>
+        </tr>
+        ${members.map((m) => muniRow(m, script, true))}`,
+    });
+  }
+  entries.sort((a, b) => srCyrillicCompare(a.sortName, b.sortName));
+
   return layout(
     script,
     t("appTitle"),
     html`<h1>${t("municipalities")}</h1>
       <table class="list">
         <thead><tr><th>${t("municipality")}</th><th class="num">${t("stations")}</th><th class="num">${t("needsReview")}</th></tr></thead>
-        <tbody>${rows}</tbody>
+        <tbody>${entries.map((e) => e.html)}</tbody>
       </table>`
   );
 }

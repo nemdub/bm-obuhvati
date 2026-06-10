@@ -31,6 +31,7 @@ from rapidfuzz import fuzz, process
 
 import config
 from common.transliterate import cyr_to_lat, nfc
+from common.normalize import normalize_street
 
 AMENDMENT_RE = re.compile(r"\b(izmena|izmene|dopuna|dopune|ispravka|ispravke)\b", re.IGNORECASE)
 MILITARY_RE = re.compile(r"vojsk", re.IGNORECASE)
@@ -82,7 +83,7 @@ def collapse(s: str) -> str:
 _LEAD_INT = re.compile(r"^\s*(\d+)")
 
 
-def rows_from_docx(html: str) -> list[tuple[int, str, str, str]]:
+def rows_from_docx(html: str) -> list[tuple[None, int, str, str, str]]:
     """Parse station rows from textutil HTML. A data row has >=4 cells and a non-empty
     name. The number comes from the first cell when present; some documents render it as
     an auto-numbered list (no text), so we fall back to a running counter."""
@@ -100,7 +101,7 @@ def rows_from_docx(html: str) -> list[tuple[int, str, str, str]]:
         m = _LEAD_INT.match(cells[0])
         num = int(m.group(1)) if m else seq
         coverage = " ".join(c for c in cells[3:] if c).strip()
-        out.append((num, cells[1], cells[2], coverage))
+        out.append((None, num, cells[1], cells[2], coverage))
     return out
 
 
@@ -112,18 +113,34 @@ def _header_start(lines: list[str]) -> int:
     return 0
 
 
-def rows_from_doc(txt: str) -> list[tuple[int, str, str, str]]:
-    """Parse station rows from linearized .doc text. Any lone integer line (optionally
-    with a trailing period) after the header delimits a station; the following lines are
-    name / address / coverage. Numbering need not be sequential (cities restart per
-    sub-municipality). Coverage cells never appear as a bare number line in textutil
-    output, so this does not misfire on house numbers."""
-    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-    start = _header_start(lines)
+SECTION_RE = re.compile(r"ГРАДСКА\s+ОПШТИНА\s+(.+)", re.IGNORECASE)
 
-    out: list[tuple[int, str, str, str]] = []
+
+def rows_from_doc(txt: str, sections: dict[str, str] | None = None
+                  ) -> list[tuple[str | None, int, str, str, str]]:
+    """Parse station rows from linearized .doc text. Any lone integer line (optionally with
+    a trailing period) after the header delimits a station; following lines are name /
+    address / coverage. Returns (section_muni_id, number, name, address, coverage).
+
+    `sections` maps a normalized 'ГРАДСКА ОПШТИНА <name>' section header to a municipality
+    id; when given (a sectioned city doc, e.g. Niš), each station is tagged with its
+    section's opstina so per-section numbering does not collide. Without it section_muni
+    is None and the caller uses the document's municipality."""
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    # For sectioned docs start at the first section header (it precedes the table header,
+    # which _header_start would otherwise skip past, dropping the first section).
+    start = _header_start(lines)
+    if sections is not None:
+        for i, ln in enumerate(lines):
+            sm = SECTION_RE.search(ln)
+            if sm and sections.get(normalize_street(sm.group(1))):
+                start = i
+                break
+
+    out: list[tuple[str | None, int, str, str, str]] = []
     cur: list[str] | None = None
     cur_num = 0
+    cur_section: str | None = None
 
     def flush() -> None:
         if cur is None:
@@ -131,13 +148,20 @@ def rows_from_doc(txt: str) -> list[tuple[int, str, str, str]]:
         name = cur[0] if len(cur) >= 1 else ""
         address = cur[1] if len(cur) >= 2 else ""
         coverage = " ".join(cur[2:]).strip()
-        out.append((cur_num, name, address, coverage))
+        out.append((cur_section, cur_num, name, address, coverage))
 
     for ln in lines[start:]:
-        # The closing section always follows the table, so only stop once we are inside it
-        # (cur set). This avoids matching the same phrases in the pre-table preamble.
         if cur is not None and TABLE_END_RE.search(ln):
-            break
+            break  # closing section follows the table; only stop once inside it
+        if sections is not None:
+            sm = SECTION_RE.search(ln)
+            if sm:
+                muni = sections.get(normalize_street(sm.group(1)))
+                if muni:  # a real sub-municipality header (not a venue named "ГРАДСКА ОПШТИНА …")
+                    flush()
+                    cur = None
+                    cur_section = muni
+                    continue
         m = INT_LINE_RE.match(ln)
         if m:
             flush()
@@ -149,7 +173,7 @@ def rows_from_doc(txt: str) -> list[tuple[int, str, str, str]]:
     return out
 
 
-def rows_from_doc_triplets(txt: str) -> list[tuple[int, str, str, str]]:
+def rows_from_doc_triplets(txt: str) -> list[tuple[None, int, str, str, str]]:
     """Fallback for .doc tables with no number column: group the lines after the header
     into (name, address, coverage) triplets and number them sequentially. Only used when
     the lone-integer parser finds nothing."""
@@ -160,9 +184,9 @@ def rows_from_doc_triplets(txt: str) -> list[tuple[int, str, str, str]]:
         if TABLE_END_RE.search(ln):
             body = body[:i]
             break
-    out: list[tuple[int, str, str, str]] = []
+    out: list[tuple[None, int, str, str, str]] = []
     for i in range(0, len(body) - 2, 3):
-        out.append((i // 3 + 1, body[i], body[i + 1], body[i + 2]))
+        out.append((None, i // 3 + 1, body[i], body[i + 1], body[i + 2]))
     return out
 
 
@@ -233,11 +257,14 @@ def main() -> int:
         if is_military or muni_id is None:
             continue  # special docs / unmapped handled separately
 
+        # Sectioned city docs (e.g. Niš) map "ГРАДСКА ОПШТИНА <name>" sections to opstine.
+        section_map = {normalize_street(k): v for k, v in config.SECTIONED_DOCS.get(path.name, {}).items()}
+
         txt = textutil(path, "txt")
         if path.suffix.lower() == ".docx":
             rows = rows_from_docx(textutil(path, "html"))
         else:
-            rows = rows_from_doc(txt)
+            rows = rows_from_doc(txt, section_map or None)
             if not rows:  # number-less table -> triplet fallback
                 rows = rows_from_doc_triplets(txt)
 
@@ -248,13 +275,14 @@ def main() -> int:
         if declared is not None and declared != len(rows):
             print(f"  WARN {path.name}: declared {declared} stations, parsed {len(rows)}")
 
-        for num, name, address, coverage in rows:
-            muni_counter[muni_id] = muni_counter.get(muni_id, 0) + 1
+        for section_muni, num, name, address, coverage in rows:
+            station_muni = section_muni or muni_id  # section's opstina, else the doc's
+            muni_counter[station_muni] = muni_counter.get(station_muni, 0) + 1
             station_rows.append({
-                # Stable unique id: municipality + running index (numbering may restart
-                # within a city, so the printed number alone is not unique).
-                "id": int(muni_id) * 100000 + muni_counter[muni_id],
-                "municipality_id": muni_id,
+                # Stable unique id: municipality + per-municipality running index (the
+                # printed number can restart per section, so it alone is not unique).
+                "id": int(station_muni) * 100000 + muni_counter[station_muni],
+                "municipality_id": station_muni,
                 "number": num,
                 "name_cyr": name,
                 "name_lat": cyr_to_lat(name),
