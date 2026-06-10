@@ -53,7 +53,16 @@ app.get("/api/s/:id/segments", async (c) => {
       review_reasons: (s.review_reason ?? "")
         .split(",")
         .filter(Boolean)
-        .map((code) => tr(REVIEW_REASONS[code] ?? code, script)),
+        .map((code) => {
+          let text = tr(REVIEW_REASONS[code] ?? code, script);
+          // For name-based matches, spell out document spelling -> matched register name
+          // (the card title shows the resolved name, so the discrepancy isn't otherwise visible).
+          if ((code === "fuzzy" || code === "muni_fallback") && s.street_id) {
+            const matched = (script === "lat" ? s.street_name_lat : s.street_name_cyr) ?? "";
+            text += `: „${tr(s.street_raw, script)}“ → „${matched}“`;
+          }
+          return text;
+        }),
       source: s.source,
       amendment_note: s.amendment_note ? tr(s.amendment_note, script) : null,
     }))
