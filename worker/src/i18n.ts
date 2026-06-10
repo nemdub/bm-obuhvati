@@ -38,6 +38,7 @@ export const STRINGS = {
   points: "Адресе",
   polygon: "Полигон",
   matchedAddresses: "Повезане адресе",
+  polygonsBuilt: "Израђени полигони",
   noPointsForStreet: "Нема повезаних адреса за ову улицу",
   noPolygon: "Нема полигона",
   none: "нема",

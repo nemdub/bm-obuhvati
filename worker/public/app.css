@@ -25,6 +25,16 @@ a { color: var(--blue); }
 .crumb a { text-decoration: none; }
 
 #muni-map { height: 440px; border-radius: 8px; border: 1px solid var(--line); margin-bottom: 16px; }
+#overview-map { height: 420px; border-radius: 8px; border: 1px solid var(--line); margin-bottom: 16px; }
+
+.stats-row {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px; margin-bottom: 16px;
+}
+.stat-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; }
+.stat-card .stat-num { font-size: 22px; font-weight: 700; }
+.stat-card .stat-num.warn { color: var(--warn); }
+.stat-card .stat-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
 
 table.list { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 table.list th, table.list td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }

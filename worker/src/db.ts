@@ -321,6 +321,29 @@ export async function searchStreets(db: D1Database, stationId: number, q: string
   return results ?? [];
 }
 
+/** All boundary outlines for the homepage overview map. Grouped members (Užice+Sevojno
+ *  etc.) report their representative's id, whose page/stats own their stations. */
+export async function allBoundaries(db: D1Database) {
+  const { results } = await db
+    .prepare(
+      `SELECT b.geojson, COALESCE(m.parent_id, m.id) AS municipality_id
+         FROM muni_boundaries b JOIN municipalities m ON m.id = b.municipality_id`
+    )
+    .all<{ geojson: string; municipality_id: string }>();
+  return results ?? [];
+}
+
+/** Dataset-wide polygon totals for the homepage summary cards. */
+export async function summaryStats(db: D1Database) {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS polygon_count, COALESCE(SUM(point_count), 0) AS matched_addresses
+         FROM polygons`
+    )
+    .first<{ polygon_count: number; matched_addresses: number }>();
+  return row ?? { polygon_count: 0, matched_addresses: 0 };
+}
+
 /** Official boundary outline(s) for a municipality — includes grouped members' outlines
  *  (Užice+Sevojno etc.), whose stations share the page and span both territories. */
 export async function muniBoundaries(db: D1Database, muniId: string) {

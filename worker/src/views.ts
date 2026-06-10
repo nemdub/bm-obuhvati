@@ -58,9 +58,16 @@ function muniRow(m: MunicipalityRow, script: Script, indent = false) {
   </tr>`;
 }
 
-export function municipalitiesView(c: Context, munis: MunicipalityRow[]) {
+export function municipalitiesView(
+  c: Context,
+  munis: MunicipalityRow[],
+  stats: { polygon_count: number; matched_addresses: number }
+) {
   const script = getScript(c);
   const t = makeT(script);
+  const fmt = (n: number) => n.toLocaleString("sr-RS");
+  const totalStations = munis.reduce((s, m) => s + m.station_count, 0);
+  const totalReview = munis.reduce((s, m) => s + m.review_count, 0);
 
   // Each entry is a standalone municipality or a nested city group; all sorted together by
   // Serbian Cyrillic azbuka (a city group sorts at its city name).
@@ -91,10 +98,29 @@ export function municipalitiesView(c: Context, munis: MunicipalityRow[]) {
     script,
     t("appTitle"),
     html`<h1>${t("municipalities")}</h1>
+      <div class="stats-row">
+        <div class="stat-card"><div class="stat-num">${fmt(munis.length)}</div><div class="stat-label">${t("municipalities")}</div></div>
+        <div class="stat-card"><div class="stat-num">${fmt(totalStations)}</div><div class="stat-label">${t("stations")}</div></div>
+        <div class="stat-card"><div class="stat-num${totalReview > 0 ? " warn" : ""}">${fmt(totalReview)}</div><div class="stat-label">${t("needsReview")}</div></div>
+        <div class="stat-card"><div class="stat-num">${fmt(stats.polygon_count)}</div><div class="stat-label">${t("polygonsBuilt")}</div></div>
+        <div class="stat-card"><div class="stat-num">${fmt(stats.matched_addresses)}</div><div class="stat-label">${t("matchedAddresses")}</div></div>
+      </div>
+      <div id="overview-map"></div>
       <table class="list">
         <thead><tr><th>${t("municipality")}</th><th class="num">${t("stations")}</th><th class="num">${t("needsReview")}</th></tr></thead>
         <tbody>${entries.map((e) => e.html)}</tbody>
-      </table>`
+      </table>
+      <script id="cfg" type="application/json">${raw(JSON.stringify({
+        munis: munis.map((m) => ({
+          id: m.id,
+          name: tr(m.name_cyr, script),
+          stations: m.station_count,
+          review: m.review_count,
+        })),
+        labels: { stations: t("stations"), needsReview: t("needsReview") },
+      }))}</script>
+      <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      <script src="/overview.js"></script>`
   );
 }
 

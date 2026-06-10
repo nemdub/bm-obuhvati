@@ -5,7 +5,7 @@ import { REVIEW_REASONS } from "./i18n";
 import {
   listMunicipalities, getMunicipality, listStations, getStation, getSegments,
   getPolygon, pointsForStation, muniPolygons, allMuniPolygons, effectiveParsed, searchStreets,
-  muniBoundaries,
+  muniBoundaries, allBoundaries, summaryStats,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
 
@@ -24,7 +24,10 @@ app.use("*", async (c, next) => {
 
 // ── Pages ───────────────────────────────────────────────────────────────────
 // Serbian abeceda ordering + Belgrade nesting are handled in the view.
-app.get("/", async (c) => c.html(municipalitiesView(c, await listMunicipalities(c.env.DB))));
+app.get("/", async (c) => {
+  const [munis, stats] = await Promise.all([listMunicipalities(c.env.DB), summaryStats(c.env.DB)]);
+  return c.html(municipalitiesView(c, munis, stats));
+});
 
 app.get("/m/:id", async (c) => {
   const muni = await getMunicipality(c.env.DB, c.req.param("id"));
@@ -186,6 +189,21 @@ app.get("/api/m/:id/polygons.geojson", async (c) => {
       },
     })),
     boundaries: bounds.map((b) => JSON.parse(b.geojson)),
+  });
+});
+
+// All municipality outlines for the homepage overview. Static register data, so it is
+// the one response allowed to escape the global no-store (browser cache for a day).
+app.get("/api/munis/boundaries.geojson", async (c) => {
+  const rows = await allBoundaries(c.env.DB);
+  c.header("Cache-Control", "public, max-age=86400");
+  return c.json({
+    type: "FeatureCollection",
+    features: rows.map((r) => ({
+      type: "Feature",
+      geometry: JSON.parse(r.geojson),
+      properties: { municipality_id: r.municipality_id },
+    })),
   });
 });
 
