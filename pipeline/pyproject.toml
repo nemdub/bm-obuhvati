@@ -1,0 +1,17 @@
+[project]
+name = "bm-obuhvati-pipeline"
+version = "0.1.0"
+description = "Offline ETL: build Serbia polling-station coverage polygons from the address register + RIK documents."
+requires-python = ">=3.11"
+dependencies = [
+    "polars>=1.0",
+    "pyproj>=3.6",
+    "shapely>=2.0",
+    "scipy>=1.13",
+    "numpy>=1.26",
+    "lxml>=5.0",
+    "rapidfuzz>=3.9",
+]
+
+[tool.ruff]
+line-length = 100

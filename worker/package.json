@@ -1,0 +1,21 @@
+{
+  "name": "bm-obuhvati-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "migrate:local": "wrangler d1 migrations apply bm-obuhvati --local",
+    "migrate:remote": "wrangler d1 migrations apply bm-obuhvati --remote",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250601.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.99.0"
+  }
+}

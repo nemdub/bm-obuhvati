@@ -1,0 +1,22 @@
+# Raw + derived data (large; not version controlled)
+data/
+pipeline/artifacts/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+
+# Node / Worker
+node_modules/
+worker/node_modules/
+worker/.wrangler/
+worker/dist/
+.dev.vars
+
+# OS
+.DS_Store
+.wrangler
+.claude
