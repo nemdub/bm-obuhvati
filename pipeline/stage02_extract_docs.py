@@ -37,6 +37,13 @@ MILITARY_RE = re.compile(r"vojsk", re.IGNORECASE)
 HEADER_HINT = "НАЗИВ ГЛАСАЧКОГ МЕСТА"
 COUNT_RE = re.compile(r"одре[ђd]\w*\s+се\s+(\d+)\s+гласачк")
 INT_LINE_RE = re.compile(r"^(\d+)\.?$")  # station number, optionally with a trailing period
+# End of the polling-station table: the resolution's closing section ("II ..." with the
+# "Ово решење доставити..." boilerplate, signatures, page markers). Without this, the last
+# station in a .doc absorbs all trailing text (there is no next number to stop it).
+TABLE_END_RE = re.compile(
+    r"^(II|III|IV|V|VI)\.?$|^Ово\s+решењ|доставити\s+Републичк|ИЗБОРНА\s+КОМИСИЈА|ПРЕДСЕДНИК",
+    re.IGNORECASE,
+)
 WS_RE = re.compile(r"\s+")
 
 
@@ -127,6 +134,10 @@ def rows_from_doc(txt: str) -> list[tuple[int, str, str, str]]:
         out.append((cur_num, name, address, coverage))
 
     for ln in lines[start:]:
+        # The closing section always follows the table, so only stop once we are inside it
+        # (cur set). This avoids matching the same phrases in the pre-table preamble.
+        if cur is not None and TABLE_END_RE.search(ln):
+            break
         m = INT_LINE_RE.match(ln)
         if m:
             flush()
@@ -145,6 +156,10 @@ def rows_from_doc_triplets(txt: str) -> list[tuple[int, str, str, str]]:
     lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
     start = _header_start(lines)
     body = lines[start:]
+    for i, ln in enumerate(body):  # drop the closing section if present
+        if TABLE_END_RE.search(ln):
+            body = body[:i]
+            break
     out: list[tuple[int, str, str, str]] = []
     for i in range(0, len(body) - 2, 3):
         out.append((i // 3 + 1, body[i], body[i + 1], body[i + 2]))
