@@ -60,6 +60,12 @@ STREET_FUZZY_MIN = 90       # rapidfuzz score below which a street match needs r
 # normalize_street()-ed at lookup, so any spelling/case works here.
 STREET_ALIASES: dict[tuple[str, str], str] = {
     ("80381", "Пинкијева"): "Хероја Пинкија",  # Sombor
+    # "Нушићева" = "Бранислава Нушића" — only in munis where the doc form is unresolved
+    # (elsewhere НУШИЋЕВА is a real register street; a global alias would corrupt those).
+    ("70785", "Нушићева"): "Бранислава Нушића",  # Majdanpek
+    ("70904", "Нушићева"): "Бранислава Нушића",  # Paraćin
+    ("70947", "Нушићева"): "Бранислава Нушића",  # Požarevac
+    ("71048", "Нушићева"): "Бранислава Нушића",  # Jagodina
 }
 
 DOC_MUNI_OVERRIDES: dict[str, str] = {

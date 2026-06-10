@@ -282,10 +282,24 @@
     if (lo % 2 === 0 && hi % 2 === 0) return "even";
     return "all";
   }
+  function boundInput(num, sfx, cls) {
+    // Text input holding a bound like "23" or "23Ц" (suffix-bounded range edge).
+    const i = document.createElement("input");
+    i.type = "text";
+    i.className = cls;
+    i.value = num == null || num === "" ? "" : `${num}${sfx || ""}`;
+    return i;
+  }
+  function parseBound(v) {
+    const m = (v || "").trim().match(/^(\d+)\s*[-/]?\s*(.*)$/);
+    if (!m) return [0, ""];
+    return [Number(m[1]), (m[2] || "").trim().toUpperCase()];
+  }
   function intervalRow(iv) {
     const row = document.createElement("div");
     row.className = "row iv";
-    const lo = numInput(iv[0], "lo"), hi = numInput(iv[1], "hi");
+    const lo = boundInput(iv[0], iv.length > 3 ? iv[3] : "", "lo");
+    const hi = boundInput(iv[1], iv.length > 4 ? iv[4] : "", "hi");
     const par = document.createElement("select");
     par.className = "parity";
     [["all", L_.parityAll], ["odd", L_.parityOdd], ["even", L_.parityEven]].forEach(([v, label]) => {
@@ -306,9 +320,12 @@
     return row;
   }
   function collect(whole, ivList, sgList, reviewed) {
-    const intervals = [...ivList.querySelectorAll(".row.iv")].map((r) =>
-      [Number(r.querySelector(".lo").value), Number(r.querySelector(".hi").value), r.querySelector(".parity").value]
-    ).filter((x) => x[0] || x[1]);
+    const intervals = [...ivList.querySelectorAll(".row.iv")].map((r) => {
+      const [lo, loSfx] = parseBound(r.querySelector(".lo").value);
+      const [hi, hiSfx] = parseBound(r.querySelector(".hi").value);
+      const parity = r.querySelector(".parity").value;
+      return loSfx || hiSfx ? [lo, hi, parity, loSfx, hiSfx] : [lo, hi, parity];
+    }).filter((x) => x[0] || x[1]);
     const singles = [...sgList.querySelectorAll(".row.sg")].map((r) =>
       [Number(r.querySelector(".n").value), r.querySelector(".suffix").value.trim().toUpperCase()]
     ).filter((x) => x[0] || x[1]);
@@ -343,11 +360,6 @@
   async function reload() {
     await Promise.all([renderSegments(), loadMap()]);
   }
-
-  document.getElementById("recompute").onclick = async () => {
-    await fetch(api("/recompute"), { method: "POST" });
-    document.getElementById("status-msg").textContent = L_.recomputeQueued;
-  };
 
   reload();
 })();

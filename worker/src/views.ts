@@ -153,10 +153,6 @@ export function stationDetailView(c: Context, st: StationRow, muniName: string) 
         <section class="panel">
           <h1>#${st.number} · ${name}</h1>
           <p class="addr">${addr}</p>
-          <div class="actions">
-            <button id="recompute" class="btn">${t("recompute")}</button>
-            <span id="status-msg" class="status-msg"></span>
-          </div>
           <div class="source">
             <div class="source-label">${t("rawText")}</div>
             <div class="source-text">${coverage}</div>

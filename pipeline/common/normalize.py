@@ -67,6 +67,17 @@ def normalize_street(name: str) -> str:
     return s
 
 
+# House-suffix ordering (azbuka) for suffix-bounded ranges: '' < А < Б < ... < Ш.
+SUFFIX_AZBUKA = "АБВГДЂЕЖЗИЈКЛЉМНЊОПРСТЋУФХЦЧЏШ"
+
+
+def suffix_rank(s: str) -> tuple:
+    """Sort key for a normalized house suffix; '' sorts before any letter."""
+    return tuple(
+        SUFFIX_AZBUKA.index(ch) if ch in SUFFIX_AZBUKA else 100 + ord(ch) for ch in s
+    )
+
+
 _CYR_VOWELS = set("АЕИОУ")
 _MAX_GEN_VARIANTS = 16
 

@@ -23,7 +23,7 @@ from rapidfuzz import fuzz, process
 
 import config
 from common.coverage_parse import interval_parity
-from common.normalize import genitive_variants, normalize_street
+from common.normalize import genitive_variants, normalize_street, suffix_rank
 
 FUZZY_MIN = config.STREET_FUZZY_MIN
 
@@ -221,6 +221,17 @@ def _parity_ok(num: int, parity: str) -> bool:
     return parity == "all" or (parity == "odd" and num % 2 == 1) or (parity == "even" and num % 2 == 0)
 
 
+def _bounds_ok(num: int, suf: str, c: dict) -> bool:
+    """Suffix-bounded range edges: '12б-16' starts at 12б (12 and 12а excluded);
+    '1-23ц' ends at 23ц (23 and 23д included, 23ш excluded). A bound without a
+    suffix keeps the historical behavior: all suffixed variants at that number match."""
+    if num == c["lo"] and c.get("losfx") and suffix_rank(suf) < suffix_rank(c["losfx"]):
+        return False
+    if num == c["hi"] and c.get("hisfx") and suffix_rank(suf) > suffix_rank(c["hisfx"]):
+        return False
+    return True
+
+
 # Claim specificity (higher wins). An exact single (number + suffix) beats a bare number
 # implying its suffixed variants, which beats a range, which beats a whole street. The
 # implied level lets "Пушкинов трг 5" also claim 5а/5б/... unless another station lists
@@ -258,7 +269,7 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
             if k == "whole":
                 cands.append((SPEC_WHOLE, c))
             elif k == "interval":
-                if c["lo"] <= num <= c["hi"] and _parity_ok(num, c["parity"]):
+                if c["lo"] <= num <= c["hi"] and _parity_ok(num, c["parity"]) and _bounds_ok(num, suf, c):
                     cands.append((SPEC_INTERVAL, c))
             elif c["num"] == num:
                 if c["suffix"] == suf:
@@ -340,9 +351,31 @@ def main() -> int:
                     pass
 
         rec = {**s, "parsed": parsed, "street_id": street_id, "method": method, "score": score,
-               "amb_ids": amb_ids}
+               "amb_ids": amb_ids, "has_paren": bool(_PAREN_RE.search(s["street_raw"]))}
         seg_recs.append(rec)
-        if not street_id:
+
+    # Old-name restatements: documents list a renamed street twice per station — once with
+    # current numbers ("Београдски пут 127-166") and once under the old name with the OLD
+    # street's numbering ("Београдски пут (Југословенска) 1-31, 2-30"). Mapping the old
+    # numbers onto the current street creates phantom claims that conflict with other
+    # stations' legitimate ones. If the SAME station also claims the SAME street via a
+    # plain (non-parenthetical) segment, the parenthetical segment is a restatement —
+    # drop its claims (the plain segment covers the houses).
+    plain_pairs = {(r["station_id"], r["street_id"]) for r in seg_recs
+                   if r["street_id"] and not r["has_paren"]}
+    n_dups = 0
+    for r in seg_recs:
+        r["old_name_dup"] = bool(
+            r["has_paren"] and r["street_id"]
+            and (r["station_id"], r["street_id"]) in plain_pairs
+        )
+        n_dups += r["old_name_dup"]
+    if n_dups:
+        print(f"  old-name restatement segments (claims dropped): {n_dups:,}")
+
+    for r in seg_recs:
+        s, parsed, street_id = r, r["parsed"], r["street_id"]
+        if not street_id or r["old_name_dup"]:
             continue
         if parsed.get("whole"):
             claims_by_street.setdefault(street_id, []).append(
@@ -351,7 +384,8 @@ def main() -> int:
             for iv in parsed.get("intervals", []):
                 claims_by_street.setdefault(street_id, []).append({
                     "seg_id": s["id"], "station_id": s["station_id"], "kind": "interval",
-                    "lo": iv[0], "hi": iv[1], "parity": _iv_parity(iv)})
+                    "lo": iv[0], "hi": iv[1], "parity": _iv_parity(iv),
+                    "losfx": iv[3] if len(iv) > 3 else "", "hisfx": iv[4] if len(iv) > 4 else ""})
             for num, sfx in parsed.get("singles", []):
                 claims_by_street.setdefault(street_id, []).append({
                     "seg_id": s["id"], "station_id": s["station_id"], "kind": "single",
@@ -387,6 +421,8 @@ def main() -> int:
     # Finalize per-segment confidence + needs_review (with reason codes explaining why).
     out_segs: list[dict] = []
     for r in seg_recs:
+        if r.get("old_name_dup"):
+            continue  # old-name restatement of a plain segment — pure duplicate, not shown
         parsed, method = r["parsed"], r["method"]
         reasons: list[str] = []
         if method == "ambiguous":
@@ -422,7 +458,7 @@ def main() -> int:
             reasons.append("unknown_kind")
         if r["source"] == "amendment":
             reasons.append("amendment")
-        if not parsed.get("whole") and r["id"] not in matched_seg_ids:
+        if not parsed.get("whole") and r["id"] not in matched_seg_ids and not r.get("old_name_dup"):
             reasons.append("no_match")
         if r["id"] in conflict_map:
             # Parameterized code: conflict:<opposing station numbers joined by |>.

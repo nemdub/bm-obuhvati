@@ -165,11 +165,6 @@ app.get("/api/s/:id/polygon.geojson", async (c) => {
   });
 });
 
-app.post("/api/s/:id/recompute", async (c) => {
-  await markDirty(c.env.DB, Number(c.req.param("id")));
-  return c.json({ ok: true });
-});
-
 app.get("/api/health", async (c) => {
   const row = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM polling_stations").first<{ n: number }>();
   return c.json({ ok: true, stations: row?.n ?? 0 });

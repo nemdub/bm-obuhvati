@@ -1,9 +1,29 @@
 /** D1 query helpers. All queries are scoped (by municipality / station / street set)
  *  to stay well under D1's response limits — never an unscoped scan of `addresses`. */
 
-// An interval is [lo, hi] or [lo, hi, parity] where parity ∈ "all" | "odd" | "even".
-// Serbian streets number odd/even on opposite sides, so a range may cover only one side.
-export type Interval = [number, number] | [number, number, string];
+// An interval is [lo, hi], [lo, hi, parity], or [lo, hi, parity, loSfx, hiSfx].
+// parity ∈ "all" | "odd" | "even" (Serbian streets number odd/even on opposite sides);
+// loSfx/hiSfx are house-suffix bounds ("1-23ц" ends at 23ц: 23 and 23д included — azbuka
+// order puts д before ц — while 23ш would be excluded).
+export type Interval =
+  | [number, number]
+  | [number, number, string]
+  | [number, number, string, string, string];
+
+const SUFFIX_AZBUKA = "АБВГДЂЕЖЗИЈКЛЉМНЊОПРСТЋУФХЦЧЏШ";
+function suffixRank(s: string): number[] {
+  return [...s].map((ch) => {
+    const i = SUFFIX_AZBUKA.indexOf(ch);
+    return i >= 0 ? i : 100 + ch.charCodeAt(0);
+  });
+}
+function rankCmp(a: number[], b: number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? -1, y = b[i] ?? -1;
+    if (x !== y) return x - y;
+  }
+  return 0;
+}
 
 export interface ParsedCoverage {
   intervals: Interval[];
@@ -20,11 +40,16 @@ export function intervalParity(iv: Interval): string {
   return "all";
 }
 
-export function houseInInterval(num: number, iv: Interval): boolean {
+export function houseInInterval(num: number, suffix: string, iv: Interval): boolean {
   const [lo, hi] = iv;
   if (num < lo || num > hi) return false;
   const p = intervalParity(iv);
-  return p === "all" || (p === "odd" && num % 2 === 1) || (p === "even" && num % 2 === 0);
+  if (!(p === "all" || (p === "odd" && num % 2 === 1) || (p === "even" && num % 2 === 0))) return false;
+  const loSfx = (iv.length > 3 && iv[3]) || "";
+  const hiSfx = (iv.length > 4 && iv[4]) || "";
+  if (num === lo && loSfx && rankCmp(suffixRank(suffix), suffixRank(loSfx)) < 0) return false;
+  if (num === hi && hiSfx && rankCmp(suffixRank(suffix), suffixRank(hiSfx)) > 0) return false;
+  return true;
 }
 
 export interface MunicipalityRow {
@@ -200,7 +225,7 @@ export async function pointsForStation(db: D1Database, stationId: number) {
     const singles = new Set(parsed.singles.map(([n, s]) => `${n}|${s}`));
     for (const a of byStreet.get(sid) ?? []) {
       if (a.house_num === null || seen.has(a.id)) continue;
-      const inRange = parsed.intervals.some((iv) => houseInInterval(a.house_num!, iv));
+      const inRange = parsed.intervals.some((iv) => houseInInterval(a.house_num!, a.house_suffix, iv));
       // Exact (num+suffix) match, or a bare number implying its suffixed variants
       // (5 -> 5а/5б/...). Cross-station "unless listed elsewhere" overrides are resolved
       // in the pipeline; this live preview approximates by matching the bare number.

@@ -21,9 +21,11 @@ from .normalize import normalize_suffix
 from .transliterate import nfc
 
 _WS = re.compile(r"\s+")
-# Range: lo-hi with an optional suffix on the upper bound ('1-23ц', '2-14А', '14-16/1',
-# '2-20-А'). The upper bound must be numeric so '12-А' stays a single (12 suffix А).
-_RANGE = re.compile(r"^(\d+)\s*[-–]\s*(\d+)\s*[-–/]?\s*([0-9А-Яа-яЂ-џA-Za-z]*)$")
+# Range: lo-hi with optional suffixes on either bound ('1-23ц', '12а-16', '2-20-А',
+# '14-16/1'). The upper bound must contain digits so '12-А' stays a single (12 suffix А).
+# Suffixed bounds are stored as 5-element intervals [lo, hi, parity, lo_sfx, hi_sfx] and
+# matched inclusively up to/from the suffix (suffix order = azbuka).
+_RANGE = re.compile(r"^(\d+)([А-Яа-яЂ-џA-Za-z]*)\s*[-–]\s*(\d+)\s*[-–/]?\s*([0-9А-Яа-яЂ-џA-Za-z]*)$")
 _SINGLE = re.compile(r"^(\d+)\s*[-–]?\s*([0-9А-Яа-яЂ-џA-Za-z/]*)$")
 _ORDINAL = re.compile(r"^\d+\.$")
 
@@ -94,10 +96,15 @@ def parse_number_token(tok: str, seg: Segment) -> None:
     if not t:
         return
     m = _RANGE.match(t)
-    if m and m.group(2):
-        lo, hi = int(m.group(1)), int(m.group(2))
-        # Store implied parity as a third element so it can be reviewed/overridden later.
-        seg.intervals.append([lo, hi, interval_parity(lo, hi)])
+    if m and m.group(3):
+        lo, hi = int(m.group(1)), int(m.group(3))
+        lo_sfx = normalize_suffix(m.group(2) or "")
+        hi_sfx = normalize_suffix(m.group(4) or "")
+        # Implied parity rides as the third element so it can be reviewed/overridden later.
+        iv = [lo, hi, interval_parity(lo, hi)]
+        if lo_sfx or hi_sfx:
+            iv += [lo_sfx, hi_sfx]
+        seg.intervals.append(iv)
         return
     m = _SINGLE.match(t)
     if m:

@@ -20,3 +20,4 @@ worker/dist/
 .DS_Store
 .wrangler
 .claude
+.idea
