@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 
 import polars as pl
 from rapidfuzz import fuzz, process
@@ -96,31 +97,41 @@ def _fuzzy(norm: str, names_map: dict[str, list[str]]) -> tuple[str, float] | No
     return None
 
 
+_PAREN_RE = re.compile(r"\(([^)]*)\)")
+
+
 def resolve_street(street_raw, muni, settlement_id, idx) -> tuple[str | None, str, float]:
     """Resolve a street name to a register street id, scoped to the station's settlement
-    first. Falling back to municipality scope (a same-named street in another settlement,
-    or genuine cross-settlement coverage) is reported as 'muni_fallback' so it is flagged
-    for review. Returns (street_id, method, score)."""
+    first, then municipality (flagged 'muni_fallback'). Returns (street_id, method, score).
+
+    Parentheticals are alternate names / provisional designations ("Елека Бенедека
+    (493. нова)", "Корзо (Бориса Кидрича)"), NOT part of the street name. They are stripped
+    for the primary match key (mashing them in lets a noisy fuzzy match e.g. „493 нова“ to
+    „3. нова“) and tried only as an EXACT alternate — never fuzzed."""
     _, by_muni_norm, by_sett_norm, *_ = idx
-    norm = normalize_street(street_raw)
+    m = _PAREN_RE.search(street_raw)
+    primary = normalize_street(_PAREN_RE.sub(" ", street_raw)) or normalize_street(street_raw)
+    alt = normalize_street(m.group(1)) if m else ""
 
-    if settlement_id:
-        sett_scope = by_sett_norm.get(settlement_id, {})
-        if norm in sett_scope:
-            return sett_scope[norm][0], "exact", 100.0
-        # Fuzzy is allowed ONLY within the station's own settlement (catches typos in the
-        # right place). It is NOT applied municipality-wide, where it invents matches for
-        # streets that don't exist (e.g. matching a nonexistent street to an unrelated one
-        # in a different settlement).
-        hit = _fuzzy(norm, sett_scope)
-        if hit:
-            return hit[0], "fuzzy", hit[1]
-
+    sett_scope = by_sett_norm.get(settlement_id, {}) if settlement_id else {}
     muni_scope = by_muni_norm.get(muni, {})
-    if norm in muni_scope:
-        # Exact name in another settlement: genuine cross-settlement coverage OR a
-        # same-named street collision. Either way it is flagged for review.
-        return muni_scope[norm][0], ("muni_fallback" if settlement_id else "exact"), 100.0
+
+    if primary in sett_scope:
+        return sett_scope[primary][0], "exact", 100.0
+    if alt and alt in sett_scope:
+        return sett_scope[alt][0], "exact", 100.0
+    # Fuzzy ONLY on the primary key, ONLY within the station's own settlement (catches
+    # typos in the right place). Never fuzzy municipality-wide (invents matches for
+    # nonexistent streets) and never fuzzy the parenthetical alternate.
+    hit = _fuzzy(primary, sett_scope)
+    if hit:
+        return hit[0], "fuzzy", hit[1]
+
+    # Municipality exact fallback (same-named street elsewhere / cross-settlement coverage).
+    if primary in muni_scope:
+        return muni_scope[primary][0], ("muni_fallback" if settlement_id else "exact"), 100.0
+    if alt and alt in muni_scope:
+        return muni_scope[alt][0], ("muni_fallback" if settlement_id else "exact"), 100.0
     return None, "none", 0.0
 
 

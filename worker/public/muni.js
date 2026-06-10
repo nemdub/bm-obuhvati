@@ -15,6 +15,32 @@
   ];
   const color = (n) => PALETTE[((n % PALETTE.length) + PALETTE.length) % PALETTE.length];
 
+  // Sortable stations table: by polling-station number (default) and checks-needed.
+  const table = document.getElementById("stations-table");
+  if (table && table.tBodies.length) {
+    const tbody = table.tBodies[0];
+    let sortCol = 0;
+    let sortDir = 1; // 1 = ascending
+    const cellNum = (row, col) => parseFloat(row.cells[col].textContent) || 0;
+    const applySort = () => {
+      [...tbody.rows]
+        .sort((a, b) => (cellNum(a, sortCol) - cellNum(b, sortCol)) * sortDir)
+        .forEach((r) => tbody.appendChild(r));
+      table.querySelectorAll("th.sortable .arrow").forEach((a) => (a.textContent = ""));
+      const arrow = table.querySelector(`th.sortable[data-col="${sortCol}"] .arrow`);
+      if (arrow) arrow.textContent = sortDir > 0 ? "▲" : "▼";
+    };
+    table.querySelectorAll("th.sortable").forEach((th) => {
+      th.addEventListener("click", () => {
+        const col = Number(th.dataset.col);
+        if (col === sortCol) sortDir = -sortDir;
+        else { sortCol = col; sortDir = 1; }
+        applySort();
+      });
+    });
+    applySort(); // default: number ascending
+  }
+
   fetch(`/api/m/${cfg.muniId}/polygons.geojson`)
     .then((r) => r.json())
     .then((fc) => {

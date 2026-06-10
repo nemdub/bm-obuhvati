@@ -112,7 +112,7 @@ export async function listStations(db: D1Database, muniId: string) {
          LEFT JOIN station_status st ON st.station_id = ps.id
         WHERE ps.municipality_id = ?
         GROUP BY ps.id
-        ORDER BY review_count DESC, ps.number`
+        ORDER BY ps.number`
     )
     .bind(muniId)
     .all();

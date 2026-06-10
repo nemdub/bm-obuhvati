@@ -79,10 +79,12 @@ export function stationsView(
     html`<p class="crumb"><a href="/">${t("municipalities")}</a> › ${tr(muni.name_cyr, script)}</p>
       <h1>${t("stations")}</h1>
       <div id="muni-map"></div>
-      <table class="list">
+      <table class="list" id="stations-table">
         <thead><tr>
-          <th class="num">${t("number")}</th><th>${t("name")}</th>
-          <th class="num">${t("segments")}</th><th class="num">${t("needsReview")}</th>
+          <th class="num sortable" data-col="0">${t("number")} <span class="arrow"></span></th>
+          <th>${t("name")}</th>
+          <th class="num">${t("segments")}</th>
+          <th class="num sortable" data-col="3">${t("needsReview")} <span class="arrow"></span></th>
           <th class="num">${t("polygon")}</th><th class="num">${t("reviewed")}</th>
         </tr></thead>
         <tbody>${rows}</tbody>

@@ -31,6 +31,9 @@ table.list th, table.list td { text-align: left; padding: 9px 12px; border-botto
 table.list th { background: #fafbfc; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
 table.list td.num, table.list th.num { text-align: right; width: 90px; }
 table.list tr:last-child td { border-bottom: none; }
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { color: var(--ink); }
+th.sortable .arrow { font-size: 10px; color: var(--blue); }
 
 .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; margin-left: 6px; vertical-align: middle; }
 .badge.warn { background: #fff0e0; color: var(--warn); }
