@@ -11,10 +11,19 @@ address is linked to at most one station. Finalizes confidence + needs_review.
 
 Usage:
   python3 stage04_match_addresses.py
+  python3 stage04_match_addresses.py --municipalities 80381,70432   # incremental: re-match
+                                                                   # only these (group_rep) munis
+
+With ``--municipalities`` only segments whose station belongs to those group_rep
+municipalities are re-matched (segment ids come from segments_amended.parquet and are
+preserved, so reviewer overrides stay attached). The results are merged into the existing
+complete segments.parquet / links.parquet — every claimant of a given street shares a
+municipality, so conflict resolution stays identical to a full run.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 
@@ -387,12 +396,29 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description="Resolve streets and match coverage to addresses.")
+    ap.add_argument(
+        "--municipalities",
+        help="Comma-separated group_rep municipality ids; re-match only their segments and "
+             "merge into the existing segments/links parquet. Default: full rebuild.",
+    )
+    args = ap.parse_args()
+    municipalities = (
+        {m.strip() for m in args.municipalities.split(",") if m.strip()}
+        if args.municipalities else None
+    )
+
     config.ensure_artifacts()
     idx = build_indexes()
     (street_meta, _bmn, _bsn, addr_by_street, settlements_by_muni,
      station_muni, station_settlement, _sett_streets) = idx
 
     segs = pl.read_parquet(config.SEGMENTS_AMENDED_PARQUET).to_dicts()
+    # Incremental scope: keep only segments whose station is in an affected municipality.
+    # station_muni already maps each station to its group_rep, so membership is exact.
+    if municipalities is not None:
+        segs = [s for s in segs if station_muni.get(s["station_id"]) in municipalities]
+        print(f"  [incremental: {len(municipalities)} muni] re-matching {len(segs):,} segments")
 
     # Reviewer overrides exported from D1 (fetch_overrides.sh). Manual street assignments
     # and number edits take precedence over machine parsing, so polygons reflect review.
@@ -499,6 +525,9 @@ def main() -> int:
     added_out: list[dict] = []
     if config.ADDITIONS_JSON.exists():
         additions = json.loads(config.ADDITIONS_JSON.read_text())
+        if municipalities is not None:
+            additions = [a for a in additions
+                         if station_muni.get(a["station_id"]) in municipalities]
         n_add = 0
         for a in additions:
             sett_id = (a["street_id"][len("sett:"):]
@@ -662,12 +691,32 @@ def main() -> int:
         })
 
     out_segs.extend(added_out)
-    pl.DataFrame(out_segs, infer_schema_length=None).write_parquet(config.SEGMENTS_PARQUET)
-    pl.DataFrame(links, infer_schema_length=None).write_parquet(config.LINKS_PARQUET)
+
+    if municipalities is None:
+        pl.DataFrame(out_segs, infer_schema_length=None).write_parquet(config.SEGMENTS_PARQUET)
+        pl.DataFrame(links, infer_schema_length=None).write_parquet(config.LINKS_PARQUET)
+    else:
+        # Merge into the complete parquets: drop every affected station's old segments and
+        # links, then append the freshly matched ones (segment ids preserved). Untouched
+        # stations carry over verbatim, so the output stays complete for stage06.
+        affected = [sid for sid, rep in station_muni.items() if rep in municipalities]
+        prev_segs = pl.read_parquet(config.SEGMENTS_PARQUET)
+        prev_links = pl.read_parquet(config.LINKS_PARQUET)
+        seg_parts = [prev_segs.filter(~pl.col("station_id").is_in(affected))]
+        if out_segs:
+            seg_parts.append(
+                pl.DataFrame(out_segs, infer_schema_length=None).select(prev_segs.columns))
+        link_parts = [prev_links.filter(~pl.col("station_id").is_in(affected))]
+        if links:
+            link_parts.append(
+                pl.DataFrame(links, infer_schema_length=None).select(prev_links.columns))
+        pl.concat(seg_parts, how="vertical_relaxed").write_parquet(config.SEGMENTS_PARQUET)
+        pl.concat(link_parts, how="vertical_relaxed").write_parquet(config.LINKS_PARQUET)
 
     n_review = sum(x["needs_review"] for x in out_segs)
     n_unres = sum(1 for x in out_segs if x["street_id"] is None)
-    print(f"  segments: {len(out_segs):,}  links: {len(links):,}  needs_review: {n_review:,}  "
+    scope = "" if municipalities is None else "[incremental] recomputed "
+    print(f"  {scope}segments: {len(out_segs):,}  links: {len(links):,}  needs_review: {n_review:,}  "
           f"unresolved_street: {n_unres:,}  conflicts: {len(conflict_map):,}  "
           f"parity_unconfirmed: {len(parity_unconfirmed):,}")
     return 0

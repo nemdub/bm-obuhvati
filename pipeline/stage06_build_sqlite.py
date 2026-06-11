@@ -126,6 +126,67 @@ def dump_group(present: dict[str, pl.DataFrame], insert_order: list[str],
     return counts
 
 
+# Incremental (--municipalities) import: only the derived tables a coverage edit can
+# change. INSERT order is parents->children (amendments after coverage_segments, since
+# amendments.target_segment_id -> coverage_segments.id; links/polygons after their parents).
+DERIVED_PARTIAL_INSERT_ORDER = [
+    "coverage_segments", "amendments", "station_address_links", "polygons",
+]
+
+
+def _chunks(xs: list, n: int):
+    for i in range(0, len(xs), n):
+        yield xs[i:i + n]
+
+
+def affected_scope(municipalities: set[str]) -> tuple[list[int], list[str]]:
+    """(affected station ids, affected municipality ids) for a group_rep set. A station/
+    municipality is affected iff its group_rep is in the set, so both lists are mutually
+    consistent: every amendment's target segment belongs to an affected station."""
+    st = pl.read_parquet(config.STATIONS_PARQUET).select("id", "municipality_id")
+    stations = [int(s) for s, m in zip(st["id"], st["municipality_id"])
+                if config.group_rep(str(m)) in municipalities]
+    mu = pl.read_parquet(config.MUNICIPALITIES_PARQUET).select("id")
+    munis = [str(i) for i in mu["id"] if config.group_rep(str(i)) in municipalities]
+    return stations, munis
+
+
+def dump_derived_partial(present: dict[str, pl.DataFrame], station_ids: list[int],
+                         muni_ids: list[str], out: Path) -> dict[str, int]:
+    """Station-scoped DELETE+INSERT for the affected stations only, instead of the full
+    delete+reload (which re-ships ~1.9M link rows / 200MB+ every run). FK-safe: delete
+    children before parents (amendments before coverage_segments), insert parents before
+    children. polling_stations and addresses are never touched (static)."""
+    counts: dict[str, int] = {}
+    with out.open("w", encoding="utf-8") as f:
+        # DELETE — children first. station_address_links + polygons key on station_id;
+        # amendments key on municipality_id and must go before coverage_segments (FK).
+        for chunk in _chunks(station_ids, 400):
+            ids = ", ".join(str(s) for s in chunk)
+            if "station_address_links" in present:
+                f.write(f"DELETE FROM station_address_links WHERE station_id IN ({ids});\n")
+            if "polygons" in present:
+                f.write(f"DELETE FROM polygons WHERE station_id IN ({ids});\n")
+        if "amendments" in present and muni_ids:
+            for chunk in _chunks(muni_ids, 400):
+                ids = ", ".join(f"'{m}'" for m in chunk)
+                f.write(f"DELETE FROM amendments WHERE municipality_id IN ({ids});\n")
+        for chunk in _chunks(station_ids, 400):
+            ids = ", ".join(str(s) for s in chunk)
+            if "coverage_segments" in present:
+                f.write(f"DELETE FROM coverage_segments WHERE station_id IN ({ids});\n")
+        # INSERT — parents first, affected rows only.
+        sids, mids = set(station_ids), set(muni_ids)
+        for table in DERIVED_PARTIAL_INSERT_ORDER:
+            if table not in present:
+                continue
+            df = present[table]
+            df = (df.filter(pl.col("municipality_id").is_in(list(mids))) if table == "amendments"
+                  else df.filter(pl.col("station_id").is_in(list(sids))))
+            counts[table] = write_inserts(f, df, table, TABLES[table][1])
+    return counts
+
+
 def write_muni_meta(df: pl.DataFrame, out: Path) -> int:
     """UPDATE statements syncing municipalities' display fields (name + parent_id) onto the
     existing D1 rows. Municipalities can't be DELETE+reinserted (addresses FK), so renames
@@ -163,10 +224,24 @@ def build_sqlite(present: dict[str, pl.DataFrame]) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Assemble the D1 dataset (sqlite + import SQL).")
     ap.add_argument("--tables", help="Comma-separated subset of tables to build. Default: all present.")
+    ap.add_argument(
+        "--municipalities",
+        help="Comma-separated group_rep municipality ids. Emit a scoped "
+             "import_derived_partial.sql (station-keyed DELETE+INSERT for just these munis) "
+             "instead of the full 200MB+ derived reload. Pairs with stage04/05 --municipalities.",
+    )
     args = ap.parse_args()
+    municipalities = (
+        {m.strip() for m in args.municipalities.split(",") if m.strip()}
+        if args.municipalities else None
+    )
 
     config.ensure_artifacts()
     wanted = set(args.tables.split(",")) if args.tables else set(TABLES)
+    # Partial mode only needs the derived tables a coverage edit can change — skip reading
+    # the 78MB addresses parquet etc.
+    if municipalities is not None:
+        wanted = {"coverage_segments", "amendments", "station_address_links", "polygons"}
 
     present: dict[str, pl.DataFrame] = {}
     for table, (path, _cols) in TABLES.items():
@@ -175,6 +250,16 @@ def main() -> int:
 
     if not present:
         raise SystemExit("No stage artifacts found to build from.")
+
+    # Incremental import: scoped DELETE+INSERT for the affected stations only.
+    if municipalities is not None:
+        station_ids, muni_ids = affected_scope(municipalities)
+        out = config.ARTIFACTS_DIR / "import_derived_partial.sql"
+        counts = dump_derived_partial(present, station_ids, muni_ids, out)
+        for t, n in counts.items():
+            print(f"  {t}: {n:,} rows (partial)")
+        print(f"  -> {out}  ({len(station_ids)} stations, {len(muni_ids)} munis)")
+        return 0
 
     # Reference data (insert-only).
     ref_present = {t: present[t] for t in REFERENCE if t in present}

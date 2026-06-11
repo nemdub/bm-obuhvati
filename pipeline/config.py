@@ -35,6 +35,8 @@ MUNI_BOUNDARIES_PARQUET = ARTIFACTS_DIR / "muni_boundaries.parquet"  # simplifie
 DOC_MUNI_MAP = ARTIFACTS_DIR / "doc_municipality_map.csv"  # filename -> municipality (review me)
 OVERRIDES_JSON = ARTIFACTS_DIR / "overrides.json"  # reviewer edits exported from D1 (fetch_overrides.sh)
 ADDITIONS_JSON = ARTIFACTS_DIR / "additions.json"  # reviewer-added street claims (fetch_overrides.sh)
+DIRTY_SNAPSHOT_JSON = ARTIFACTS_DIR / "dirty_snapshot.json"  # station_status dirty rows at fetch time
+CLEAR_DIRTY_SQL = ARTIFACTS_DIR / "clear_dirty.sql"  # race-safe dirty=0 UPDATEs (post-import)
 ADDED_SEG_BASE = 9_000_000_000_000  # synthetic segment-id base (shared with the Worker)
 SQLITE_OUT = ARTIFACTS_DIR / "bm.sqlite"
 

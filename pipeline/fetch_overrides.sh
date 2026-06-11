@@ -1,6 +1,8 @@
 #!/bin/sh
 # Export reviewer overrides (segment_overrides) from remote D1 into
 # pipeline/artifacts/overrides.json, for stage04 to consume on the next pipeline run.
+# Also snapshots the per-station `dirty` flags so recompute.sh can scope an incremental
+# rebuild to the touched municipalities and clear the flags race-safely afterwards.
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$DIR/artifacts"
@@ -22,4 +24,13 @@ data = json.load(sys.stdin)
 rows = data[0]['results'] if data and 'results' in data[0] else []
 json.dump(rows, open('$DIR/artifacts/additions.json', 'w'), ensure_ascii=False)
 print(f'wrote {len(rows)} added street claims -> artifacts/additions.json')
+"
+npx wrangler d1 execute bm-obuhvati --remote --json \
+  --command "SELECT station_id, updated_at FROM station_status WHERE dirty = 1" \
+  | "$DIR/../.venv/bin/python" -c "
+import sys, json
+data = json.load(sys.stdin)
+rows = data[0]['results'] if data and 'results' in data[0] else []
+json.dump(rows, open('$DIR/artifacts/dirty_snapshot.json', 'w'), ensure_ascii=False)
+print(f'wrote {len(rows)} dirty stations -> artifacts/dirty_snapshot.json')
 "

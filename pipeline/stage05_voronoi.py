@@ -12,10 +12,19 @@ Output polygons are reprojected to WGS84 GeoJSON.
 
 Usage:
   python3 stage05_voronoi.py
+  python3 stage05_voronoi.py --municipalities 80381,70432   # incremental: recompute only
+                                                            # these (group_rep) municipalities
+
+With ``--municipalities`` only the settlements touched by those municipalities' stations
+are re-tessellated; the FULL point set is still loaded so halo (cross-settlement boundary)
+constraints are unchanged, making each recomputed polygon identical to a full run. The new
+polygons are merged into the existing complete polygons.parquet (affected stations' rows
+replaced, everyone else's kept), so stage06's import stays a correct full reload.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 from datetime import datetime, timezone
 
@@ -177,7 +186,31 @@ def station_clip_geoms(df: pl.DataFrame, boundaries: dict) -> dict[int, object]:
     return clip_geoms
 
 
+def affected_stations(municipalities: set[str]) -> set[int]:
+    """Station ids whose group_rep municipality is in ``municipalities`` (the scoping unit
+    for incremental recompute: edits to a station only move addresses within its own
+    municipality group, so its polygon — and its same-settlement neighbours' — are the
+    only ones that can change)."""
+    st = pl.read_parquet(config.STATIONS_PARQUET).select("id", "municipality_id")
+    return {
+        int(sid) for sid, m in zip(st["id"], st["municipality_id"])
+        if config.group_rep(str(m)) in municipalities
+    }
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser(description="Per-settlement Voronoi -> station polygons.")
+    ap.add_argument(
+        "--municipalities",
+        help="Comma-separated group_rep municipality ids; recompute only their settlements "
+             "and merge into the existing polygons.parquet. Default: full rebuild.",
+    )
+    args = ap.parse_args()
+    municipalities = (
+        {m.strip() for m in args.municipalities.split(",") if m.strip()}
+        if args.municipalities else None
+    )
+
     config.ensure_artifacts()
     addr = pl.read_parquet(config.ADDRESSES_PARQUET).select(
         "id", "settlement_id", "municipality_id", "x", "y"
@@ -188,10 +221,21 @@ def main() -> int:
         pl.col("station_id").fill_null(UNASSIGNED)
     )
 
+    # Incremental scope: the stations whose polygons may change, and the settlements that
+    # must be re-tessellated to capture them (a station can span several settlements).
+    affected: set[int] | None = None
+    affected_sett_ids: set | None = None
+    if municipalities is not None:
+        affected = affected_stations(municipalities)
+        aff_df = df.filter(pl.col("station_id").is_in(list(affected)))
+        affected_sett_ids = set(aff_df["settlement_id"].unique().to_list())
+
     boundaries = load_muni_boundaries()
     for g in boundaries.values():
         shapely.prepare(g)
-    clip_geoms = station_clip_geoms(df, boundaries)
+    # Clip geometry is per-station independent, so in scoped mode only build it for the
+    # affected stations (skips ~2.5M point-in-polygon checks for everyone else).
+    clip_geoms = station_clip_geoms(aff_df if affected is not None else df, boundaries)
 
     # Global arrays + coarse spatial grid for halo lookup. Bucket size >= the cell cap, so
     # own-bucket + 8 neighbors covers every foreign point a boundary cell could touch.
@@ -213,9 +257,16 @@ def main() -> int:
     # Accumulate cells per station across settlements.
     station_cells: dict[int, list] = {}
     sids_all = df["station_id"].to_numpy()
+    n_compute = 0
     for code, own_idx in idx_by_sett.items():
         if len(own_idx) == 0:
             continue
+        # Incremental mode: only re-tessellate settlements touched by affected stations.
+        # Every other settlement still contributes its points as halo (above), so the
+        # ones we DO compute are identical to a full run.
+        if affected_sett_ids is not None and sett_codes[code] not in affected_sett_ids:
+            continue
+        n_compute += 1
         xy = np.column_stack([X[own_idx], Y[own_idx]])
         sids = sids_all[own_idx]
 
@@ -238,6 +289,10 @@ def main() -> int:
 
         for sid, cells in cells_for_settlement(xy, sids, halo_xy).items():
             if sid == UNASSIGNED:
+                continue
+            # Defensive: in scoped mode only ever touch affected stations' polygons, so a
+            # stray station in a recomputed settlement can't get a half-recomputed polygon.
+            if affected is not None and sid not in affected:
                 continue
             station_cells.setdefault(sid, []).extend(cells)
     settlements = sett_codes  # for the summary line
@@ -279,7 +334,23 @@ def main() -> int:
     for r in rows:
         r["point_count"] = int(counts.get(r["station_id"], 0))
 
-    pl.DataFrame(rows, infer_schema_length=None).write_parquet(config.POLYGONS_PARQUET)
+    if affected is None:
+        pl.DataFrame(rows, infer_schema_length=None).write_parquet(config.POLYGONS_PARQUET)
+        n_total = len(rows)
+    else:
+        # Merge into the existing complete parquet: drop every affected station's old row
+        # (so stations whose coverage was emptied vanish) and append the freshly computed
+        # ones. Untouched stations are carried over verbatim -> output stays complete and
+        # stage06's full delete+reload import remains correct.
+        prev = pl.read_parquet(config.POLYGONS_PARQUET)
+        kept = prev.filter(~pl.col("station_id").is_in(list(affected)))
+        if rows:
+            new_rows = pl.DataFrame(rows, infer_schema_length=None).select(prev.columns)
+            out = pl.concat([kept, new_rows], how="vertical_relaxed")
+        else:
+            out = kept
+        out.write_parquet(config.POLYGONS_PARQUET)
+        n_total = out.height
 
     # Simplified boundary copy for the review-UI overlay (stage06 ships it to D1).
     brows = [
@@ -294,10 +365,16 @@ def main() -> int:
     ]
     pl.DataFrame(brows).write_parquet(config.MUNI_BOUNDARIES_PARQUET)
 
-    print(
-        f"  settlements: {len(settlements):,}  station polygons: {len(rows):,}"
-        f"  clipped to muni boundary: {n_clipped:,}  boundaries: {len(brows):,}"
-    )
+    if affected is None:
+        print(
+            f"  settlements: {len(settlements):,}  station polygons: {len(rows):,}"
+            f"  clipped to muni boundary: {n_clipped:,}  boundaries: {len(brows):,}"
+        )
+    else:
+        print(
+            f"  [incremental: {len(municipalities)} muni] recomputed {n_compute:,} "
+            f"settlements -> {len(rows):,} station polygons; merged into {n_total:,} total"
+        )
     return 0
 
 
