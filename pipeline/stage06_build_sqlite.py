@@ -151,39 +151,87 @@ def affected_scope(municipalities: set[str]) -> tuple[list[int], list[str]]:
     return stations, munis
 
 
+# A single `wrangler d1 execute` is killed if it exceeds D1's per-execution CPU time
+# limit, and DELETEing ~138k rows from the 1.9M-row links table is enough to trip it on its
+# own — so the partial import is emitted as per-station BATCHES sized by link count, each
+# delimited by a `-- CHUNK` marker that d1_apply.sh runs as its own execute. ~4k links of
+# delete + ~4k of insert per chunk stays well under the limit.
+PARTIAL_LINK_BUDGET = 4000   # links touched (delete+insert) per chunk
+PARTIAL_MAX_STATIONS = 250   # also cap stations/chunk so a sparse batch can't grow an
+                             # oversized IN(...) list / huge cumulative delete
+CHUNK_MARKER = "-- CHUNK\n"
+
+
+def _station_batches(station_ids: list[int], link_count: dict[int, int]) -> list[list[int]]:
+    """Greedily group stations so each batch's total links <= PARTIAL_LINK_BUDGET (and
+    <= PARTIAL_MAX_STATIONS stations), bounding the work in each chunk's d1 execute."""
+    batches: list[list[int]] = []
+    cur: list[int] = []
+    cur_links = 0
+    for sid in station_ids:
+        cur.append(sid)
+        cur_links += link_count.get(sid, 0)
+        if cur_links >= PARTIAL_LINK_BUDGET or len(cur) >= PARTIAL_MAX_STATIONS:
+            batches.append(cur)
+            cur, cur_links = [], 0
+    if cur:
+        batches.append(cur)
+    return batches
+
+
 def dump_derived_partial(present: dict[str, pl.DataFrame], station_ids: list[int],
                          muni_ids: list[str], out: Path) -> dict[str, int]:
     """Station-scoped DELETE+INSERT for the affected stations only, instead of the full
-    delete+reload (which re-ships ~1.9M link rows / 200MB+ every run). FK-safe: delete
-    children before parents (amendments before coverage_segments), insert parents before
-    children. polling_stations and addresses are never touched (static)."""
-    counts: dict[str, int] = {}
+    delete+reload (which re-ships ~1.9M link rows / 200MB+ every run), emitted as CPU-safe
+    `-- CHUNK`-delimited batches.
+
+    FK-safety: links/segments are keyed by station_id and a link only references its own
+    station's segment, so each per-station batch is self-contained (delete children, then
+    delete + reinsert its segments, then reinsert children). amendments
+    (target_segment_id -> coverage_segments.id) are deleted up front — before any segment
+    delete — and reinserted in a final chunk, after every batch's segments are back."""
+    seg, lnk = present.get("coverage_segments"), present.get("station_address_links")
+    pol, amd = present.get("polygons"), present.get("amendments")
+    sids = station_ids
+    seg_aff = seg.filter(pl.col("station_id").is_in(sids)) if seg is not None else None
+    lnk_aff = lnk.filter(pl.col("station_id").is_in(sids)) if lnk is not None else None
+    pol_aff = pol.filter(pl.col("station_id").is_in(sids)) if pol is not None else None
+    amd_aff = (amd.filter(pl.col("municipality_id").is_in(muni_ids))
+               if amd is not None and muni_ids else None)
+
+    link_count: dict[int, int] = {}
+    if lnk_aff is not None:
+        for s, c in lnk_aff.group_by("station_id").len().iter_rows():
+            link_count[int(s)] = c
+    batches = _station_batches(sids, link_count)
+
+    counts = {"coverage_segments": 0, "amendments": 0, "station_address_links": 0, "polygons": 0}
     with out.open("w", encoding="utf-8") as f:
-        # DELETE — children first. station_address_links + polygons key on station_id;
-        # amendments key on municipality_id and must go before coverage_segments (FK).
-        for chunk in _chunks(station_ids, 400):
-            ids = ", ".join(str(s) for s in chunk)
-            if "station_address_links" in present:
-                f.write(f"DELETE FROM station_address_links WHERE station_id IN ({ids});\n")
-            if "polygons" in present:
-                f.write(f"DELETE FROM polygons WHERE station_id IN ({ids});\n")
-        if "amendments" in present and muni_ids:
+        # amendments deleted first (FK: before any coverage_segments delete), own chunk.
+        if amd_aff is not None and amd_aff.height:
             for chunk in _chunks(muni_ids, 400):
                 ids = ", ".join(f"'{m}'" for m in chunk)
                 f.write(f"DELETE FROM amendments WHERE municipality_id IN ({ids});\n")
-        for chunk in _chunks(station_ids, 400):
-            ids = ", ".join(str(s) for s in chunk)
-            if "coverage_segments" in present:
+            f.write(CHUNK_MARKER)
+        # one chunk per station batch: delete children -> delete+reinsert its rows.
+        for batch in batches:
+            ids = ", ".join(str(s) for s in batch)
+            if lnk is not None:
+                f.write(f"DELETE FROM station_address_links WHERE station_id IN ({ids});\n")
+            if pol is not None:
+                f.write(f"DELETE FROM polygons WHERE station_id IN ({ids});\n")
+            if seg is not None:
                 f.write(f"DELETE FROM coverage_segments WHERE station_id IN ({ids});\n")
-        # INSERT — parents first, affected rows only.
-        sids, mids = set(station_ids), set(muni_ids)
-        for table in DERIVED_PARTIAL_INSERT_ORDER:
-            if table not in present:
-                continue
-            df = present[table]
-            df = (df.filter(pl.col("municipality_id").is_in(list(mids))) if table == "amendments"
-                  else df.filter(pl.col("station_id").is_in(list(sids))))
-            counts[table] = write_inserts(f, df, table, TABLES[table][1])
+            for tbl, dfa in (("coverage_segments", seg_aff),
+                             ("station_address_links", lnk_aff), ("polygons", pol_aff)):
+                if dfa is not None:
+                    counts[tbl] += write_inserts(
+                        f, dfa.filter(pl.col("station_id").is_in(batch)), tbl, TABLES[tbl][1])
+            f.write(CHUNK_MARKER)
+        # amendments reinserted last — every affected segment is back in place by now.
+        if amd_aff is not None and amd_aff.height:
+            counts["amendments"] = write_inserts(f, amd_aff, "amendments", TABLES["amendments"][1])
+            f.write(CHUNK_MARKER)
     return counts
 
 
