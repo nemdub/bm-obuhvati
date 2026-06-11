@@ -47,48 +47,56 @@ app.get("/api/s/:id/segments", async (c) => {
   const script = getScript(c);
   const segs = await getSegments(c.env.DB, Number(c.req.param("id")));
   return c.json(
-    segs.map((s) => ({
-      id: s.id,
-      street_raw: tr(s.street_raw, script),
-      street_name: s.ov_street_name_cyr
-        ? tr(s.ov_street_name_cyr, script)
-        : s.street_name_cyr ? tr(s.street_name_cyr, script) : null,
-      street_resolved: !!(s.ov_street_id ?? s.street_id),
-      manual_street: !!s.ov_street_id,
-      manual_street_id: s.ov_street_id,
-      kind: s.kind,
-      parsed: effectiveParsed(s),
-      manual_locked: s.ov_json != null || s.ov_street_id != null ? 1 : 0,
-      confidence: s.confidence,
-      needs_review: s.needs_review && !s.ov_reviewed ? 1 : 0,
-      review_reasons: (s.review_reason ?? "")
-        .split(",")
-        .filter(Boolean)
-        .map((code) => {
-          // Codes may carry a parameter after ':' (e.g. "conflict:7|12" = opposing station numbers).
-          const [base, param] = code.split(":");
-          let text = tr(REVIEW_REASONS[base] ?? base, script);
-          // For name-based matches, spell out document spelling -> matched register name
-          // (the card title shows the resolved name, so the discrepancy isn't otherwise visible).
-          if ((base === "fuzzy" || base === "muni_fallback" || base === "alias") && s.street_id) {
-            const matched = (script === "lat" ? s.street_name_lat : s.street_name_cyr) ?? "";
-            text += `: „${tr(s.street_raw, script)}“ → „${matched}“`;
-          }
-          if (base === "conflict" && param) {
-            text += ` (${tr("бр.", script)} ${param.split("|").join(", ")})`;
-          }
-          if (base === "ambiguous" && param) {
-            text += `: ${tr(param.split("|").join(", "), script)}`;
-          }
-          if (base === "settlement_claim" && param) {
-            text += `: ${tr(param, script)}`;
-          }
-          return text;
-        }),
-      source: s.source,
-      added_id: s.added_id ?? null,
-      amendment_note: s.amendment_note ? tr(s.amendment_note, script) : null,
-    }))
+    segs.map((s) => {
+      // Village-name claims anchor street_id on an arbitrary street of the settlement
+      // (stage04 picks streets[0]) — its register name must not be shown as the title.
+      const settlementClaim =
+        (s.review_reason ?? "").includes("settlement_claim") && !s.ov_street_id;
+      return {
+        id: s.id,
+        street_raw: tr(s.street_raw, script),
+        street_name: s.ov_street_name_cyr
+          ? tr(s.ov_street_name_cyr, script)
+          : settlementClaim
+            ? tr(s.street_raw, script)
+            : s.street_name_cyr ? tr(s.street_name_cyr, script) : null,
+        street_resolved: !!(s.ov_street_id ?? s.street_id),
+        manual_street: !!s.ov_street_id,
+        manual_street_id: s.ov_street_id,
+        kind: s.kind,
+        parsed: effectiveParsed(s),
+        manual_locked: s.ov_json != null || s.ov_street_id != null ? 1 : 0,
+        confidence: s.confidence,
+        needs_review: s.needs_review && !s.ov_reviewed ? 1 : 0,
+        review_reasons: (s.review_reason ?? "")
+          .split(",")
+          .filter(Boolean)
+          .map((code) => {
+            // Codes may carry a parameter after ':' (e.g. "conflict:7|12" = opposing station numbers).
+            const [base, param] = code.split(":");
+            let text = tr(REVIEW_REASONS[base] ?? base, script);
+            // For name-based matches, spell out document spelling -> matched register name
+            // (the card title shows the resolved name, so the discrepancy isn't otherwise visible).
+            if ((base === "fuzzy" || base === "muni_fallback" || base === "alias") && s.street_id) {
+              const matched = (script === "lat" ? s.street_name_lat : s.street_name_cyr) ?? "";
+              text += `: „${tr(s.street_raw, script)}“ → „${matched}“`;
+            }
+            if (base === "conflict" && param) {
+              text += ` (${tr("бр.", script)} ${param.split("|").join(", ")})`;
+            }
+            if (base === "ambiguous" && param) {
+              text += `: ${tr(param.split("|").join(", "), script)}`;
+            }
+            if (base === "settlement_claim" && param) {
+              text += `: ${tr(param, script)}`;
+            }
+            return text;
+          }),
+        source: s.source,
+        added_id: s.added_id ?? null,
+        amendment_note: s.amendment_note ? tr(s.amendment_note, script) : null,
+        };
+    })
   );
 });
 
