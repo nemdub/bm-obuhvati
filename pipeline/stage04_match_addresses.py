@@ -81,8 +81,13 @@ def build_indexes():
     station_settlement: dict[int, str | None] = {}
     for sid, addr in zip(stations["id"], stations["address_cyr"]):
         station_settlement[sid] = resolve_settlement_from_address(addr, station_muni[sid], settlements_by_muni)
+    # settlement id -> all its street ids (for village-name coverage claims).
+    sett_to_streets: dict[str, list[str]] = {}
+    for sid, meta in street_meta.items():
+        sett_to_streets.setdefault(meta["settlement_id"], []).append(sid)
+
     return (street_meta, by_muni_norm, by_sett_norm, addr_by_street, settlements_by_muni,
-            station_muni, station_settlement)
+            station_muni, station_settlement, sett_to_streets)
 
 
 def resolve_settlement(settlement_raw, muni, settlements_by_muni) -> str | None:
@@ -269,6 +274,17 @@ def resolve_street(street_raw, muni, settlement_id, idx
         if len(ids) == 1:
             return ids[0], ("muni_fallback" if settlement_id else exact_method), 100.0, []
         return None, "ambiguous", 0.0, ids
+    # Village-name coverage: some stations name a whole SETTLEMENT instead of streets
+    # ("Белосавци" in Topola). If the name matches a settlement in the municipality,
+    # LAST RESORT — only when no street matches anywhere in the municipality (otherwise it hijacks cross-settlement street matches); claim every street in it (extra ids ride in the 4th slot, method 'settlement').
+    _, _, _, _, setts_by_muni, _, _, sett_to_streets = idx
+    sett_key = primary[len("НАСЕЉЕ "):] if primary.startswith("НАСЕЉЕ ") else primary
+    for s_id, s_norm in setts_by_muni.get(muni, []):
+        if s_norm == sett_key:
+            streets = sett_to_streets.get(s_id, [])
+            if streets:
+                return streets[0], "settlement", 85.0, streets[1:]
+
     return None, "none", 0.0, []
 
 
@@ -299,6 +315,7 @@ SPEC_EXACT_SINGLE = 3
 SPEC_IMPLIED_SINGLE = 2
 SPEC_INTERVAL = 1
 SPEC_WHOLE = 0
+SPEC_SETT_WHOLE = -1  # village-name claim: yields to ANY street-level claim
 
 
 def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[int, dict], set[int], set[int]]:
@@ -327,6 +344,8 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
             k = c["kind"]
             if k == "whole":
                 cands.append((SPEC_WHOLE, c))
+            elif k == "sett_whole":
+                cands.append((SPEC_SETT_WHOLE, c))
             elif k == "interval":
                 if c["lo"] <= num <= c["hi"] and _parity_ok(num, c["parity"]) and _bounds_ok(num, suf, c):
                     cands.append((SPEC_INTERVAL, c))
@@ -370,7 +389,8 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
 def main() -> int:
     config.ensure_artifacts()
     idx = build_indexes()
-    street_meta, _bmn, _bsn, addr_by_street, settlements_by_muni, station_muni, station_settlement = idx
+    (street_meta, _bmn, _bsn, addr_by_street, settlements_by_muni,
+     station_muni, station_settlement, _sett_streets) = idx
 
     segs = pl.read_parquet(config.SEGMENTS_AMENDED_PARQUET).to_dicts()
 
@@ -438,11 +458,12 @@ def main() -> int:
             continue
         # 'base_parts': a plain base name claims every numbered part street (extras ride
         # in amb_ids), each with the same parsed numbers.
-        targets = [street_id] + (r["amb_ids"] if r["method"] == "base_parts" else [])
+        targets = [street_id] + (r["amb_ids"] if r["method"] in ("base_parts", "settlement") else [])
+        whole_kind = "sett_whole" if r["method"] == "settlement" else "whole"
         for tid in targets:
             if parsed.get("whole"):
                 claims_by_street.setdefault(tid, []).append(
-                    {"seg_id": s["id"], "station_id": s["station_id"], "kind": "whole"})
+                    {"seg_id": s["id"], "station_id": s["station_id"], "kind": whole_kind})
             else:
                 for iv in parsed.get("intervals", []):
                     claims_by_street.setdefault(tid, []).append({
@@ -555,6 +576,11 @@ def main() -> int:
             # Plain base name expanded to all numbered part streets — confirmable.
             conf = 0.7
             reasons.append("base_parts")
+        elif method == "settlement":
+            # Village-name coverage: the whole settlement is claimed — confirmable.
+            conf = 0.8
+            sname = sett_names.get(street_meta[r["street_id"]]["settlement_id"], "")
+            reasons.append("settlement_claim:" + sname if sname else "settlement_claim")
         elif method == "muni_fallback":
             conf = 0.4
             reasons.append("muni_fallback")

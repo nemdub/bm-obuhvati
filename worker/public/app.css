@@ -64,6 +64,8 @@ tr.city-child td:first-child { padding-left: 30px; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; max-height: calc(100vh - 130px); overflow: auto; }
 .panel h1 { font-size: 18px; }
 .addr { color: var(--muted); margin-top: -8px; }
+.addr-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.tt-addr { color: #666; font-size: 11px; }
 .actions { margin: 10px 0; display: flex; align-items: center; gap: 10px; }
 .status-msg { color: var(--ok); font-size: 13px; }
 /* Source coverage text: pinned to the top of the scrolling panel so the reviewer can

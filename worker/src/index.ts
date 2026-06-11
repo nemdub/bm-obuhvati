@@ -80,6 +80,9 @@ app.get("/api/s/:id/segments", async (c) => {
           if (base === "ambiguous" && param) {
             text += `: ${tr(param.split("|").join(", "), script)}`;
           }
+          if (base === "settlement_claim" && param) {
+            text += `: ${tr(param, script)}`;
+          }
           return text;
         }),
       source: s.source,
@@ -186,6 +189,7 @@ app.get("/api/m/:id/polygons.geojson", async (c) => {
         station_id: r.station_id,
         number: r.number,
         name: script === "lat" ? r.name_lat : r.name_cyr,
+        address: script === "lat" ? r.address_lat : r.address_cyr,
       },
     })),
     boundaries: bounds.map((b) => JSON.parse(b.geojson)),

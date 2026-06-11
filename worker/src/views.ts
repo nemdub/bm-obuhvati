@@ -135,7 +135,8 @@ export function stationsView(
     (s) => html`<tr>
       <td class="num">${s.number}</td>
       <td><a href="/s/${s.id}">${tr(s.name_cyr, script)}</a>
-        ${s.is_amendment ? html`<span class="badge amend">${t("amendment")}</span>` : ""}</td>
+        ${s.is_amendment ? html`<span class="badge amend">${t("amendment")}</span>` : ""}
+        ${s.address_cyr ? html`<div class="addr-sub">${tr(s.address_cyr, script)}</div>` : ""}</td>
       <td class="num">${s.seg_count}</td>
       <td class="num">${s.review_count > 0 ? html`<span class="badge warn">${s.review_count}</span>` : "0"}</td>
       <td class="num">${s.has_polygon ? html`<span class="ok-mark">✓</span>` : html`<span class="badge warn">${t("none")}</span>`}</td>

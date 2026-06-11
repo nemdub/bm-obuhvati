@@ -54,7 +54,10 @@
       const layer = L.geoJSON(fc, {
         style: (f) => ({ color: color(f.properties.number), weight: 1, fillOpacity: 0.25, fillColor: color(f.properties.number) }),
         onEachFeature: (f, l) => {
-          l.bindTooltip(`#${f.properties.number} · ${f.properties.name}`);
+          l.bindTooltip(
+            `#${f.properties.number} · ${f.properties.name}` +
+            (f.properties.address ? `<br><span class="tt-addr">${f.properties.address}</span>` : "")
+          );
           l.on("mouseover", () => l.setStyle({ weight: 3, fillOpacity: 0.45 }));
           l.on("mouseout", () => l.setStyle({ weight: 1, fillOpacity: 0.25 }));
           l.on("click", () => { window.location.href = `/s/${f.properties.station_id}`; });

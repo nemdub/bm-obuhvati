@@ -138,7 +138,7 @@ export async function getMunicipality(db: D1Database, id: string) {
 export async function listStations(db: D1Database, muniId: string) {
   const { results } = await db
     .prepare(
-      `SELECT ps.id, ps.number, ps.name_cyr, ps.name_lat, ps.is_amendment,
+      `SELECT ps.id, ps.number, ps.name_cyr, ps.name_lat, ps.address_cyr, ps.address_lat, ps.is_amendment,
               COUNT(DISTINCT cs.id) AS seg_count,
               COALESCE(SUM(CASE WHEN cs.needs_review = 1 AND COALESCE(o.reviewed, 0) = 0
                                 THEN 1 ELSE 0 END), 0) AS review_count,
@@ -236,8 +236,21 @@ interface AddrRow {
 export async function pointsForStation(db: D1Database, stationId: number) {
   const segs = await getSegments(db, stationId);
   const effStreet = (s: SegmentRow) => s.ov_street_id ?? s.street_id;
-  const streetIds = [...new Set(segs.map(effStreet).filter((x): x is string => !!x))];
+  let streetIds = [...new Set(segs.map(effStreet).filter((x): x is string => !!x))];
   if (streetIds.length === 0) return { type: "FeatureCollection", features: [] };
+
+  // Settlement claims ("Белосавци" = the whole village) span EVERY street of the
+  // settlement, not just the one stored on the segment — expand them for the preview.
+  const settSegs = segs.filter((s) => (s.review_reason ?? "").includes("settlement_claim") && s.street_id);
+  const settExtra = new Map<string, string[]>(); // seg street_id -> all settlement street ids
+  for (const s of settSegs) {
+    const { results: ext } = await db.prepare(
+      `SELECT id FROM streets WHERE settlement_id = (SELECT settlement_id FROM streets WHERE id = ?)`
+    ).bind(s.street_id).all<{ id: string }>();
+    const ids = (ext ?? []).map((r) => r.id);
+    settExtra.set(s.street_id!, ids);
+    streetIds = [...new Set([...streetIds, ...ids])];
+  }
 
   const placeholders = streetIds.map(() => "?").join(",");
   const { results } = await db
@@ -262,7 +275,9 @@ export async function pointsForStation(db: D1Database, stationId: number) {
     if (!sid) continue;
     const parsed = effectiveParsed(seg);
     const singles = new Set(parsed.singles.map(([n, s]) => `${n}|${s}`));
-    for (const a of byStreet.get(sid) ?? []) {
+    const segStreets = settExtra.get(sid) ?? [sid];
+    const segAddrs = segStreets.flatMap((x) => byStreet.get(x) ?? []);
+    for (const a of segAddrs) {
       if (a.house_num === null || seen.has(a.id)) continue;
       const inRange = parsed.intervals.some((iv) => houseInInterval(a.house_num!, a.house_suffix, iv));
       // Exact (num+suffix) match, or a bare number implying its suffixed variants
@@ -291,13 +306,13 @@ export async function pointsForStation(db: D1Database, stationId: number) {
 export async function allMuniPolygons(db: D1Database, muniId: string) {
   const { results } = await db
     .prepare(
-      `SELECT p.station_id, ps.number, ps.name_cyr, ps.name_lat, p.geojson
+      `SELECT p.station_id, ps.number, ps.name_cyr, ps.name_lat, ps.address_cyr, ps.address_lat, p.geojson
          FROM polygons p JOIN polling_stations ps ON ps.id = p.station_id
         WHERE ps.municipality_id = ?
         ORDER BY ps.number`
     )
     .bind(muniId)
-    .all<{ station_id: number; number: number; name_cyr: string; name_lat: string; geojson: string }>();
+    .all<{ station_id: number; number: number; name_cyr: string; name_lat: string; address_cyr: string; address_lat: string; geojson: string }>();
   return results ?? [];
 }
 

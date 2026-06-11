@@ -258,10 +258,17 @@ def main() -> int:
                 merged = clipped
                 n_clipped += 1
         area = merged.area  # m^2 (UTM)
-        wgs = to_wgs84(merged.simplify(config.SIMPLIFY_TOL_M, preserve_topology=True))
+        # Adaptive simplification: whole-village polygons can exceed the D1 statement
+        # budget (~50KB); escalate tolerance until the GeoJSON fits.
+        gj = None
+        for tol in (config.SIMPLIFY_TOL_M, 15, 40, 100, 250):
+            wgs = to_wgs84(merged.simplify(tol, preserve_topology=True))
+            gj = json.dumps(mapping(wgs), ensure_ascii=False)
+            if len(gj.encode()) <= 45_000:
+                break
         rows.append({
             "station_id": sid,
-            "geojson": json.dumps(mapping(wgs), ensure_ascii=False),
+            "geojson": gj,
             "area_m2": round(area, 1),
             "point_count": None,
             "computed_at": now,
