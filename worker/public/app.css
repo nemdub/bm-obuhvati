@@ -51,6 +51,7 @@ th.sortable .arrow { font-size: 10px; color: var(--blue); }
 .street-results:empty { display: none; }
 .street-item { padding: 5px 8px; cursor: pointer; font-size: 13px; }
 .street-item:hover { background: #eef4fb; }
+.street-item.area { font-weight: 600; }
 tr.city-head td { font-weight: 700; background: #f1f4f7; }
 tr.city-child td:first-child { padding-left: 30px; }
 

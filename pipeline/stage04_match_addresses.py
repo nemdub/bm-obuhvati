@@ -416,11 +416,19 @@ def main() -> int:
         street_id, method, score, amb_ids = resolve_street(s["street_raw"], muni, settlement_id, idx)
 
         # Apply reviewer override: manual street wins (if it exists in the register) and
-        # manual number edits replace the machine parse for claim building.
+        # manual number edits replace the machine parse for claim building. A "sett:<id>"
+        # pick means the reviewer chose a whole settlement (village / city area): anchor
+        # on its first street and ride the rest in amb_ids, like document village claims.
         ov = overrides.get(s["id"])
         if ov:
-            if ov.get("manual_street_id") and ov["manual_street_id"] in street_meta:
-                street_id, method, score, amb_ids = ov["manual_street_id"], "manual", 100.0, []
+            ov_sid = ov.get("manual_street_id")
+            if ov_sid and ov_sid.startswith("sett:"):
+                sett_streets = _sett_streets.get(ov_sid[len("sett:"):], [])
+                if sett_streets:
+                    street_id, method, score, amb_ids = (
+                        sett_streets[0], "manual_settlement", 100.0, sett_streets[1:])
+            elif ov_sid and ov_sid in street_meta:
+                street_id, method, score, amb_ids = ov_sid, "manual", 100.0, []
             if ov.get("manual_json"):
                 try:
                     mp = json.loads(ov["manual_json"])
@@ -458,8 +466,9 @@ def main() -> int:
             continue
         # 'base_parts': a plain base name claims every numbered part street (extras ride
         # in amb_ids), each with the same parsed numbers.
-        targets = [street_id] + (r["amb_ids"] if r["method"] in ("base_parts", "settlement") else [])
-        whole_kind = "sett_whole" if r["method"] == "settlement" else "whole"
+        targets = [street_id] + (
+            r["amb_ids"] if r["method"] in ("base_parts", "settlement", "manual_settlement") else [])
+        whole_kind = "sett_whole" if r["method"] in ("settlement", "manual_settlement") else "whole"
         for tid in targets:
             if parsed.get("whole"):
                 claims_by_street.setdefault(tid, []).append(
@@ -475,15 +484,28 @@ def main() -> int:
                         "seg_id": s["id"], "station_id": s["station_id"], "kind": "single",
                         "num": num, "suffix": sfx})
 
+    # Settlement names (for added-claim labels and human-readable reasons below).
+    _setts = pl.read_parquet(config.SETTLEMENTS_PARQUET)
+    sett_names = dict(zip(_setts["id"], _setts["name_cyr"]))
+
     # Reviewer-added street claims (streets the document omitted entirely): synthetic
     # segments with deterministic ids (ADDED_SEG_BASE + addition id), claims like any
     # other, and materialized into coverage_segments so links keep FK integrity.
+    # A "sett:<id>" street_id is a whole-settlement claim from the area-aware picker.
     added_out: list[dict] = []
     if config.ADDITIONS_JSON.exists():
         additions = json.loads(config.ADDITIONS_JSON.read_text())
         n_add = 0
         for a in additions:
-            if a["street_id"] not in street_meta:
+            sett_id = (a["street_id"][len("sett:"):]
+                       if str(a["street_id"]).startswith("sett:") else None)
+            if sett_id:
+                targets = _sett_streets.get(sett_id, [])
+                if not targets:
+                    continue
+            elif a["street_id"] in street_meta:
+                targets = [a["street_id"]]
+            else:
                 continue
             try:
                 mp = json.loads(a["manual_json"])
@@ -492,26 +514,33 @@ def main() -> int:
             seg_id = config.ADDED_SEG_BASE + int(a["id"])
             parsed = {"intervals": mp.get("intervals", []), "singles": mp.get("singles", []),
                       "whole": bool(mp.get("whole")), "unknown_tokens": []}
-            tid = a["street_id"]
-            if parsed["whole"]:
-                claims_by_street.setdefault(tid, []).append(
-                    {"seg_id": seg_id, "station_id": a["station_id"], "kind": "whole"})
-            else:
-                for iv in parsed["intervals"]:
-                    claims_by_street.setdefault(tid, []).append({
-                        "seg_id": seg_id, "station_id": a["station_id"], "kind": "interval",
-                        "lo": iv[0], "hi": iv[1], "parity": _iv_parity(iv),
-                        "losfx": iv[3] if len(iv) > 3 else "", "hisfx": iv[4] if len(iv) > 4 else ""})
-                for num, sfx in parsed["singles"]:
-                    claims_by_street.setdefault(tid, []).append({
-                        "seg_id": seg_id, "station_id": a["station_id"], "kind": "single",
-                        "num": num, "suffix": sfx})
+            # Settlement claims yield to any street-level claim, like document ones.
+            whole_kind = "sett_whole" if sett_id else "whole"
+            for tid in targets:
+                if parsed["whole"]:
+                    claims_by_street.setdefault(tid, []).append(
+                        {"seg_id": seg_id, "station_id": a["station_id"], "kind": whole_kind})
+                else:
+                    for iv in parsed["intervals"]:
+                        claims_by_street.setdefault(tid, []).append({
+                            "seg_id": seg_id, "station_id": a["station_id"], "kind": "interval",
+                            "lo": iv[0], "hi": iv[1], "parity": _iv_parity(iv),
+                            "losfx": iv[3] if len(iv) > 3 else "", "hisfx": iv[4] if len(iv) > 4 else ""})
+                    for num, sfx in parsed["singles"]:
+                        claims_by_street.setdefault(tid, []).append({
+                            "seg_id": seg_id, "station_id": a["station_id"], "kind": "single",
+                            "num": num, "suffix": sfx})
+            sname = sett_names.get(sett_id, sett_id) if sett_id else None
             added_out.append({
                 "id": seg_id, "station_id": a["station_id"], "settlement_raw": None,
-                "street_raw": street_meta[tid]["name_norm"], "street_id": tid,
+                "street_raw": sname or street_meta[targets[0]]["name_norm"],
+                "street_id": targets[0],
                 "kind": "manual_added", "parsed_json": json.dumps(parsed, ensure_ascii=False),
                 "manual_json": None, "manual_locked": 1, "confidence": 0.9, "needs_review": 0,
-                "review_reason": None, "parse_dialect": "manual", "source": "added",
+                # The settlement_claim marker makes the UI title the card by the area
+                # name (street_raw) instead of the anchor street's register name.
+                "review_reason": f"settlement_claim:{sname}" if sname else None,
+                "parse_dialect": "manual", "source": "added",
                 "amendment_note": None,
             })
             n_add += 1
@@ -527,9 +556,6 @@ def main() -> int:
     # Printed station number per station id (for human-readable conflict reasons).
     _st = pl.read_parquet(config.STATIONS_PARQUET)
     station_number = dict(zip(_st["id"], _st["number"]))
-    # Settlement names (for human-readable ambiguity reasons).
-    _setts = pl.read_parquet(config.SETTLEMENTS_PARQUET)
-    sett_names = dict(zip(_setts["id"], _setts["name_cyr"]))
 
     for street_id, claims in claims_by_street.items():
         rows = addr_by_street.get(street_id, [])
@@ -570,8 +596,8 @@ def main() -> int:
             # Hand-maintained substitution — surfaced so the reviewer confirms it once.
             conf = 0.6
             reasons.append("alias")
-        elif method == "manual":
-            conf = 0.9  # reviewer-assigned street; no flag
+        elif method in ("manual", "manual_settlement"):
+            conf = 0.9  # reviewer-assigned street/settlement; no flag
         elif method == "base_parts":
             # Plain base name expanded to all numbered part streets — confirmable.
             conf = 0.7

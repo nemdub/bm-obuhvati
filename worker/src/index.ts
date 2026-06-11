@@ -5,7 +5,7 @@ import { REVIEW_REASONS } from "./i18n";
 import {
   listMunicipalities, getMunicipality, listStations, getStation, getSegments,
   getPolygon, pointsForStation, muniPolygons, allMuniPolygons, effectiveParsed, searchStreets,
-  muniBoundaries, allBoundaries, summaryStats,
+  muniBoundaries, allBoundaries, summaryStats, settIdOfPick,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
 
@@ -144,9 +144,11 @@ app.post("/api/s/:id/segments", async (c) => {
     intervals?: unknown[]; singles?: unknown[];
   }>();
   if (!body.street_id) return c.json({ ok: false, error: "street_id required" }, 400);
-  const street = await c.env.DB.prepare("SELECT id FROM streets WHERE id = ?")
-    .bind(body.street_id).first();
-  if (!street) return c.json({ ok: false, error: "unknown street" }, 400);
+  const settId = settIdOfPick(body.street_id);
+  const target = settId
+    ? await c.env.DB.prepare("SELECT id FROM settlements WHERE id = ?").bind(settId).first()
+    : await c.env.DB.prepare("SELECT id FROM streets WHERE id = ?").bind(body.street_id).first();
+  if (!target) return c.json({ ok: false, error: "unknown street" }, 400);
   const manual = JSON.stringify({
     intervals: body.intervals ?? [],
     singles: body.singles ?? [],
@@ -179,6 +181,7 @@ app.get("/api/s/:id/streets", async (c) => {
     id: r.id,
     name: script === "lat" ? r.name_lat : r.name_cyr,
     settlement: script === "lat" ? r.settlement_lat : r.settlement_cyr,
+    area: !!r.area,
   })));
 });
 

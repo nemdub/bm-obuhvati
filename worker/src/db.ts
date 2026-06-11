@@ -101,6 +101,14 @@ export interface SegmentRow {
 /** Synthetic segment-id base for reviewer-added claims (shared with the pipeline). */
 export const ADDED_SEG_BASE = 9_000_000_000_000;
 
+/** Tagged street-id for a settlement (whole area) picked in the street pickers.
+ *  Stored in segment_overrides.manual_street_id / station_added_segments.street_id
+ *  (no FK there); the pipeline expands it to every street of the settlement. */
+export const SETT_PICK_PREFIX = "sett:";
+export function settIdOfPick(id: string | null | undefined): string | null {
+  return id?.startsWith(SETT_PICK_PREFIX) ? id.slice(SETT_PICK_PREFIX.length) : null;
+}
+
 export function effectiveParsed(seg: SegmentRow): ParsedCoverage {
   const raw = seg.ov_json ?? seg.parsed_json;
   try {
@@ -168,11 +176,13 @@ export async function getSegments(db: D1Database, stationId: number): Promise<Se
       `SELECT cs.*, s.name_cyr AS street_name_cyr, s.name_lat AS street_name_lat,
               o.manual_json AS ov_json, o.manual_street_id AS ov_street_id,
               o.reviewed AS ov_reviewed,
-              ms.name_cyr AS ov_street_name_cyr, ms.name_lat AS ov_street_name_lat
+              COALESCE(ms.name_cyr, mst.name_cyr) AS ov_street_name_cyr,
+              COALESCE(ms.name_lat, mst.name_lat) AS ov_street_name_lat
          FROM coverage_segments cs
          LEFT JOIN streets s ON s.id = cs.street_id
          LEFT JOIN segment_overrides o ON o.segment_id = cs.id
          LEFT JOIN streets ms ON ms.id = o.manual_street_id
+         LEFT JOIN settlements mst ON 'sett:' || mst.id = o.manual_street_id
         WHERE cs.station_id = ?
         ORDER BY cs.id`
     )
@@ -186,8 +196,11 @@ export async function getSegments(db: D1Database, stationId: number): Promise<Se
   const { results: added } = await db
     .prepare(
       `SELECT a.id AS aid, a.station_id, a.street_id, a.manual_json,
-              s.name_cyr, s.name_lat
-         FROM station_added_segments a JOIN streets s ON s.id = a.street_id
+              COALESCE(s.name_cyr, st.name_cyr) AS name_cyr,
+              COALESCE(s.name_lat, st.name_lat) AS name_lat
+         FROM station_added_segments a
+         LEFT JOIN streets s ON s.id = a.street_id
+         LEFT JOIN settlements st ON 'sett:' || st.id = a.street_id
         WHERE a.station_id = ? ORDER BY a.id`
     )
     .bind(stationId)
@@ -236,21 +249,31 @@ interface AddrRow {
 export async function pointsForStation(db: D1Database, stationId: number) {
   const segs = await getSegments(db, stationId);
   const effStreet = (s: SegmentRow) => s.ov_street_id ?? s.street_id;
-  let streetIds = [...new Set(segs.map(effStreet).filter((x): x is string => !!x))];
-  if (streetIds.length === 0) return { type: "FeatureCollection", features: [] };
 
-  // Settlement claims ("Белосавци" = the whole village) span EVERY street of the
-  // settlement, not just the one stored on the segment — expand them for the preview.
-  const settSegs = segs.filter((s) => (s.review_reason ?? "").includes("settlement_claim") && s.street_id);
-  const settExtra = new Map<string, string[]>(); // seg street_id -> all settlement street ids
-  for (const s of settSegs) {
-    const { results: ext } = await db.prepare(
-      `SELECT id FROM streets WHERE settlement_id = (SELECT settlement_id FROM streets WHERE id = ?)`
-    ).bind(s.street_id).all<{ id: string }>();
-    const ids = (ext ?? []).map((r) => r.id);
-    settExtra.set(s.street_id!, ids);
-    streetIds = [...new Set([...streetIds, ...ids])];
+  // Streets each segment spans. Settlement claims cover EVERY street of the settlement:
+  // pipeline-derived ones ("Белосавци" = the whole village) anchor on one street and are
+  // marked via review_reason; reviewer picks carry a tagged "sett:<id>" directly.
+  const segStreets = new Map<number, string[]>(); // seg id -> register street ids
+  for (const s of segs) {
+    const eff = effStreet(s);
+    if (!eff) continue;
+    const pickedSett = settIdOfPick(eff);
+    if (pickedSett) {
+      const { results: ext } = await db.prepare(
+        `SELECT id FROM streets WHERE settlement_id = ?`
+      ).bind(pickedSett).all<{ id: string }>();
+      segStreets.set(s.id, (ext ?? []).map((r) => r.id));
+    } else if ((s.review_reason ?? "").includes("settlement_claim") && !s.ov_street_id) {
+      const { results: ext } = await db.prepare(
+        `SELECT id FROM streets WHERE settlement_id = (SELECT settlement_id FROM streets WHERE id = ?)`
+      ).bind(eff).all<{ id: string }>();
+      segStreets.set(s.id, (ext ?? []).map((r) => r.id));
+    } else {
+      segStreets.set(s.id, [eff]);
+    }
   }
+  const streetIds = [...new Set([...segStreets.values()].flat())];
+  if (streetIds.length === 0) return { type: "FeatureCollection", features: [] };
 
   const placeholders = streetIds.map(() => "?").join(",");
   const { results } = await db
@@ -271,12 +294,11 @@ export async function pointsForStation(db: D1Database, stationId: number) {
   const seen = new Set<number>();
   const features: unknown[] = [];
   for (const seg of segs) {
-    const sid = effStreet(seg);
-    if (!sid) continue;
+    const ids = segStreets.get(seg.id);
+    if (!ids) continue;
     const parsed = effectiveParsed(seg);
     const singles = new Set(parsed.singles.map(([n, s]) => `${n}|${s}`));
-    const segStreets = settExtra.get(sid) ?? [sid];
-    const segAddrs = segStreets.flatMap((x) => byStreet.get(x) ?? []);
+    const segAddrs = ids.flatMap((x) => byStreet.get(x) ?? []);
     for (const a of segAddrs) {
       if (a.house_num === null || seen.has(a.id)) continue;
       const inRange = parsed.intervals.some((iv) => houseInInterval(a.house_num!, a.house_suffix, iv));
@@ -316,24 +338,36 @@ export async function allMuniPolygons(db: D1Database, muniId: string) {
   return results ?? [];
 }
 
-/** Search register streets within a station's municipality, for the manual street picker.
+/** Search register streets AND settlements within a station's municipality, for the
+ *  manual pickers — a "street" in the document is sometimes a whole village or city
+ *  area. Settlement rows come first, with the tagged "sett:<id>" pick id and area = 1.
  *  Matches the normalized Cyrillic key and (ASCII-case-insensitively) the Latin name. */
 export async function searchStreets(db: D1Database, stationId: number, q: string) {
   const st = await db.prepare("SELECT municipality_id FROM polling_stations WHERE id = ?")
     .bind(stationId).first<{ municipality_id: string }>();
   if (!st) return [];
   const needle = `%${q.toUpperCase()}%`;
-  const { results } = await db
-    .prepare(
-      `SELECT s.id, s.name_cyr, s.name_lat, st.name_cyr AS settlement_cyr, st.name_lat AS settlement_lat
+  type Hit = { id: string; name_cyr: string; name_lat: string;
+               settlement_cyr: string | null; settlement_lat: string | null; area: number };
+  const [setts, streets] = await Promise.all([
+    db.prepare(
+      `SELECT 'sett:' || id AS id, name_cyr, name_lat,
+              NULL AS settlement_cyr, NULL AS settlement_lat, 1 AS area
+         FROM settlements
+        WHERE municipality_id = ?1
+          AND (UPPER(name_cyr) LIKE ?2 OR UPPER(name_lat) LIKE ?2)
+        ORDER BY name_cyr LIMIT 10`
+    ).bind(st.municipality_id, needle).all<Hit>(),
+    db.prepare(
+      `SELECT s.id, s.name_cyr, s.name_lat,
+              st.name_cyr AS settlement_cyr, st.name_lat AS settlement_lat, 0 AS area
          FROM streets s JOIN settlements st ON st.id = s.settlement_id
-        WHERE st.municipality_id = ?
-          AND (s.name_norm LIKE ? OR UPPER(s.name_lat) LIKE ?)
+        WHERE st.municipality_id = ?1
+          AND (s.name_norm LIKE ?2 OR UPPER(s.name_lat) LIKE ?2)
         ORDER BY st.name_cyr, s.name_cyr LIMIT 30`
-    )
-    .bind(st.municipality_id, needle, needle)
-    .all<{ id: string; name_cyr: string; name_lat: string; settlement_cyr: string; settlement_lat: string }>();
-  return results ?? [];
+    ).bind(st.municipality_id, needle).all<Hit>(),
+  ]);
+  return [...(setts.results ?? []), ...(streets.results ?? [])];
 }
 
 /** All boundary outlines for the homepage overview map. Grouped members (Užice+Sevojno

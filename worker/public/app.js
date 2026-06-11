@@ -123,6 +123,11 @@
     return b;
   }
 
+  // Picker result label: streets show their settlement, settlements show an area tag.
+  function streetItemLabel(r) {
+    return r.area ? `${r.name} — ${L_.settlementArea}` : `${r.name} (${r.settlement})`;
+  }
+
   // Reviewer-added street claim card: street name + numbers, with a remove button only
   // (the document never mentions this street; the claim itself is the human statement).
   function renderAddedSegment(seg) {
@@ -178,8 +183,8 @@
         list.innerHTML = "";
         rows.forEach((r) => {
           const item = document.createElement("div");
-          item.className = "street-item";
-          item.textContent = `${r.name} (${r.settlement})`;
+          item.className = "street-item" + (r.area ? " area" : "");
+          item.textContent = streetItemLabel(r);
           item.onclick = async () => {
             await fetch(api("/segments"), {
               method: "POST", headers: { "Content-Type": "application/json" },
@@ -263,11 +268,11 @@
         spList.innerHTML = "";
         rows.forEach((r) => {
           const item = document.createElement("div");
-          item.className = "street-item";
-          item.textContent = `${r.name} (${r.settlement})`;
+          item.className = "street-item" + (r.area ? " area" : "");
+          item.textContent = streetItemLabel(r);
           item.onclick = () => {
             chosenStreet = r.id;
-            spInput.value = `${r.name} (${r.settlement})`;
+            spInput.value = streetItemLabel(r);
             spList.innerHTML = "";
           };
           spList.appendChild(item);
