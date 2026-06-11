@@ -629,11 +629,18 @@ def main() -> int:
         if r["id"] in parity_unconfirmed:
             reasons.append("parity_unconfirmed")
 
+        # parity_unconfirmed is informational only: the inferred odd/even side has proven
+        # correct in the vast majority of cases, so it no longer triggers review on its own.
+        # It stays in review_reason (shown as context when the segment is flagged for some
+        # OTHER reason, and the per-range parity dropdown remains available either way), but
+        # a segment flagged ONLY for parity is treated as resolved.
+        flagging = [x for x in reasons if x != "parity_unconfirmed"]
+
         out_segs.append({
             "id": r["id"], "station_id": r["station_id"], "settlement_raw": r["settlement_raw"],
             "street_raw": r["street_raw"], "street_id": r["street_id"], "kind": r["kind"],
             "parsed_json": r["parsed_json"], "manual_json": None, "manual_locked": 0,
-            "confidence": conf, "needs_review": int(bool(reasons)),
+            "confidence": conf, "needs_review": int(bool(flagging)),
             "review_reason": ",".join(reasons) or None,
             "parse_dialect": r["parse_dialect"], "source": r["source"],
             "amendment_note": r.get("amendment_note"),

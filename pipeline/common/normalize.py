@@ -44,6 +44,32 @@ def _roman_to_arabic(m: re.Match) -> str:
         total = total - v if v < prev else total + v
         prev = max(prev, v)
     return str(total)
+
+
+# Spelled-out Serbian ordinals -> Arabic. The same street appears as "Краља Петра
+# Првог", "Краља Петра I" and "Краља Петра 1" — the register itself uses all three.
+# Roman numerals already fold to Arabic above; fold the spelled-out ordinal words too
+# so every form converges (applied symmetrically to doc and register). Matched only as
+# whole adjective-declined words — a trailing inflection is REQUIRED — so cardinals
+# ("ПЕТ", "СЕДАМ") and unrelated words ("ДРУГОВИ", "ОСМАНЛИЈА", "ПРВЕНСТВА") are left
+# untouched. Stems are tried longest-first so "ПЕТНАЕСТ" beats "ПЕТ".
+_ORDINAL_STEMS = {
+    "ПРВ": 1, "ДРУГ": 2, "ТРЕЋ": 3, "ЧЕТВРТ": 4, "ПЕТ": 5,
+    "ШЕСТ": 6, "СЕДМ": 7, "ОСМ": 8, "ДЕВЕТ": 9, "ДЕСЕТ": 10,
+    "ЈЕДАНАЕСТ": 11, "ДВАНАЕСТ": 12, "ТРИНАЕСТ": 13, "ЧЕТРНАЕСТ": 14,
+    "ПЕТНАЕСТ": 15, "ШЕСНАЕСТ": 16, "СЕДАМНАЕСТ": 17, "ОСАМНАЕСТ": 18,
+    "ДЕВЕТНАЕСТ": 19, "ДВАДЕСЕТ": 20,
+}
+# Hard- and soft-adjective inflections (ОГ/ОГА/ОМ..., ЕГ/ЕГА/ЕМ... for soft "ТРЕЋИ"),
+# longest first so e.g. "ОГА" is preferred over "ОГ". A non-empty ending is required.
+_ORDINAL_RE = re.compile(
+    r"\b(" + "|".join(sorted(_ORDINAL_STEMS, key=len, reverse=True)) + r")"
+    r"(?:ОГА|ОМЕ|ОМУ|ЕГА|ЕМУ|ИМА|ОГ|ОМ|ЕГ|ЕМ|ИМ|ИХ|ОЈ|ЕЈ|И|А|О|Е|У)\b"
+)
+
+
+def _ordinal_to_arabic(m: re.Match) -> str:
+    return str(_ORDINAL_STEMS[m.group(1)])
 # Latin letters that may appear in suffixes coming from the register's Latin column.
 _HAS_LATIN_RE = re.compile(r"[A-Za-zĐŽĆČŠđžćčš]")
 
@@ -63,6 +89,7 @@ def normalize_street(name: str) -> str:
     s = re.sub(r"[^0-9A-Za-zА-Яа-яЂЃЄЅІЇЈЉЊЋЌЎЏђѓєѕіїјљњћќўџ\s]", " ", s)
     s = _DR_RE.sub("ДОКТОРА", s)
     s = _ROMAN_RE.sub(_roman_to_arabic, s)
+    s = _ORDINAL_RE.sub(_ordinal_to_arabic, s)
     s = _WS_RE.sub(" ", s).strip()
     return s
 
