@@ -109,6 +109,11 @@ export function settIdOfPick(id: string | null | undefined): string | null {
   return id?.startsWith(SETT_PICK_PREFIX) ? id.slice(SETT_PICK_PREFIX.length) : null;
 }
 
+/** Sentinel stored in segment_overrides.manual_street_id when the reviewer confirms the
+ *  street does not exist in the register: the segment is resolved (out of the review
+ *  queue) but maps to no street, so no addresses/polygon are built for it. */
+export const NONE_PICK = "none";
+
 export function effectiveParsed(seg: SegmentRow): ParsedCoverage {
   const raw = seg.ov_json ?? seg.parsed_json;
   try {
@@ -256,7 +261,7 @@ export async function pointsForStation(db: D1Database, stationId: number) {
   const segStreets = new Map<number, string[]>(); // seg id -> register street ids
   for (const s of segs) {
     const eff = effStreet(s);
-    if (!eff) continue;
+    if (!eff || eff === NONE_PICK) continue; // "doesn't exist" — no addresses to map
     const pickedSett = settIdOfPick(eff);
     if (pickedSett) {
       const { results: ext } = await db.prepare(

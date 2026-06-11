@@ -422,7 +422,11 @@ def main() -> int:
         ov = overrides.get(s["id"])
         if ov:
             ov_sid = ov.get("manual_street_id")
-            if ov_sid and ov_sid.startswith("sett:"):
+            if ov_sid == "none":
+                # Reviewer confirmed the street does not exist in the register: drop any
+                # machine match so no links/polygon are built, and treat it as resolved.
+                street_id, method, score, amb_ids = None, "manual_none", 100.0, []
+            elif ov_sid and ov_sid.startswith("sett:"):
                 sett_streets = _sett_streets.get(ov_sid[len("sett:"):], [])
                 if sett_streets:
                     street_id, method, score, amb_ids = (
@@ -577,6 +581,17 @@ def main() -> int:
         if r.get("old_name_dup"):
             continue  # old-name restatement of a plain segment — pure duplicate, not shown
         parsed, method = r["parsed"], r["method"]
+        if method == "manual_none":
+            # Reviewer confirmed the street doesn't exist: resolved, no street, no flag.
+            out_segs.append({
+                "id": r["id"], "station_id": r["station_id"], "settlement_raw": r["settlement_raw"],
+                "street_raw": r["street_raw"], "street_id": None, "kind": r["kind"],
+                "parsed_json": r["parsed_json"], "manual_json": None, "manual_locked": 1,
+                "confidence": 0.9, "needs_review": 0, "review_reason": None,
+                "parse_dialect": r["parse_dialect"], "source": r["source"],
+                "amendment_note": r.get("amendment_note"),
+            })
+            continue
         reasons: list[str] = []
         if method == "ambiguous":
             # Same-named street in several other settlements — not resolved automatically.

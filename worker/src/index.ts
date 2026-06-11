@@ -5,7 +5,7 @@ import { REVIEW_REASONS } from "./i18n";
 import {
   listMunicipalities, getMunicipality, listStations, getStation, getSegments,
   getPolygon, pointsForStation, muniPolygons, allMuniPolygons, effectiveParsed, searchStreets,
-  muniBoundaries, allBoundaries, summaryStats, settIdOfPick,
+  muniBoundaries, allBoundaries, summaryStats, settIdOfPick, NONE_PICK,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
 import { buildGeoJSON, buildKML, muniSlug, type ExportRow } from "./export";
@@ -53,6 +53,8 @@ app.get("/api/s/:id/segments", async (c) => {
       // (stage04 picks streets[0]) — its register name must not be shown as the title.
       const settlementClaim =
         (s.review_reason ?? "").includes("settlement_claim") && !s.ov_street_id;
+      // Reviewer confirmed the street does not exist in the register (sentinel pick).
+      const streetMissing = s.ov_street_id === NONE_PICK;
       return {
         id: s.id,
         street_raw: tr(s.street_raw, script),
@@ -61,9 +63,10 @@ app.get("/api/s/:id/segments", async (c) => {
           : settlementClaim
             ? tr(s.street_raw, script)
             : s.street_name_cyr ? tr(s.street_name_cyr, script) : null,
-        street_resolved: !!(s.ov_street_id ?? s.street_id),
-        manual_street: !!s.ov_street_id,
-        manual_street_id: s.ov_street_id,
+        street_resolved: !streetMissing && !!(s.ov_street_id ?? s.street_id),
+        street_missing: streetMissing,
+        manual_street: !!s.ov_street_id && !streetMissing,
+        manual_street_id: streetMissing ? null : s.ov_street_id,
         kind: s.kind,
         parsed: effectiveParsed(s),
         manual_locked: s.ov_json != null || s.ov_street_id != null ? 1 : 0,

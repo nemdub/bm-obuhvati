@@ -210,7 +210,8 @@
     head.className = "seg-head";
     const title = seg.street_resolved ? (seg.street_name || seg.street_raw) : seg.street_raw;
     head.innerHTML = `<span class="seg-title">${escapeHtml(title)}</span>`;
-    if (!seg.street_resolved) head.innerHTML += `<span class="badge warn">${L_.streetUnresolved}</span>`;
+    if (seg.street_missing) head.innerHTML += `<span class="badge ok">${L_.streetMissing}</span>`;
+    else if (!seg.street_resolved) head.innerHTML += `<span class="badge warn">${L_.streetUnresolved}</span>`;
     if (seg.source === "amendment") head.innerHTML += `<span class="badge amend">${L_.amendment}</span>`;
     if (seg.needs_review) head.innerHTML += `<span class="badge warn">${L_.needsReview}</span>`;
     if (seg.manual_locked) head.innerHTML += `<span class="badge ok">✎</span>`;
@@ -251,7 +252,8 @@
       if (spBox.style.display === "block") spInput.focus();
     });
     const spBox = document.createElement("div");
-    spBox.style.display = seg.street_resolved ? "none" : "block"; // open by default when unresolved
+    // Open by default when unresolved, but not once it's been marked "doesn't exist".
+    spBox.style.display = seg.street_resolved || seg.street_missing ? "none" : "block";
     const spInput = document.createElement("input");
     spInput.type = "text";
     spInput.placeholder = L_.searchStreet;
@@ -349,6 +351,17 @@
     });
     actions.appendChild(save);
     actions.appendChild(reviewed);
+    // "Doesn't exist": for an unmatched street, confirm it's absent from the register
+    // and resolve the segment (no addresses/polygon are built for it).
+    if (!seg.street_resolved && !seg.street_missing) {
+      actions.appendChild(mkBtn(L_.doesNotExist, "btn", async () => {
+        await fetch(`/api/segments/${seg.id}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...collect(whole, ivList, sgList, true), street_id: "none" }),
+        });
+        await reload();
+      }));
+    }
     if (seg.manual_locked) {
       actions.appendChild(mkBtn(L_.revert, "btn", async () => {
         await fetch(`/api/segments/${seg.id}/manual`, { method: "DELETE" });

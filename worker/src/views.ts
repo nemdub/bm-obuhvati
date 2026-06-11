@@ -214,6 +214,7 @@ function labelBundle(script: Script) {
     singles: t("singles"), suffix: t("suffix"), save: t("save"), revert: t("revert"),
     markReviewed: t("markReviewed"), needsReview: t("needsReview"), reviewed: t("reviewed"),
     confidence: t("confidence"), amendmentNote: t("amendmentNote"), streetUnresolved: t("streetUnresolved"),
+    doesNotExist: t("doesNotExist"), streetMissing: t("streetMissing"),
     addRange: t("addRange"), addSingle: t("addSingle"), saved: t("saved"), matchedAddresses: t("matchedAddresses"),
     noPointsForStreet: t("noPointsForStreet"),
     parityAll: t("parityAll"), parityOdd: t("parityOdd"), parityEven: t("parityEven"),
