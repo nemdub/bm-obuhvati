@@ -4,7 +4,7 @@ import { tr } from "./translit";
 import { REVIEW_REASONS } from "./i18n";
 import {
   listMunicipalities, getMunicipality, listStations, getStation, getSegments,
-  getPolygon, pointsForStation, muniPolygons, allMuniPolygons, effectiveParsed, searchStreets,
+  getPolygon, pointsForStation, streetLinesForStation, muniPolygons, allMuniPolygons, effectiveParsed, searchStreets,
   muniBoundaries, allBoundaries, summaryStats, settIdOfPick, NONE_PICK,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
@@ -252,6 +252,10 @@ app.get("/api/munis/boundaries.geojson", async (c) => {
 
 app.get("/api/s/:id/points.geojson", async (c) => {
   return c.json(await pointsForStation(c.env.DB, Number(c.req.param("id"))));
+});
+
+app.get("/api/s/:id/street-lines.geojson", async (c) => {
+  return c.json(await streetLinesForStation(c.env.DB, Number(c.req.param("id"))));
 });
 
 app.get("/api/s/:id/polygon.geojson", async (c) => {

@@ -251,13 +251,11 @@ interface AddrRow {
 
 /** Live-compute matched address points for a station from its EFFECTIVE segments
  *  (manual override || parsed), so edits are reflected immediately on the map. */
-export async function pointsForStation(db: D1Database, stationId: number) {
-  const segs = await getSegments(db, stationId);
+// Streets each segment spans. Settlement claims cover EVERY street of the settlement:
+// pipeline-derived ones ("Белосавци" = the whole village) anchor on one street and are
+// marked via review_reason; reviewer picks carry a tagged "sett:<id>" directly.
+async function resolveSegStreets(db: D1Database, segs: SegmentRow[]) {
   const effStreet = (s: SegmentRow) => s.ov_street_id ?? s.street_id;
-
-  // Streets each segment spans. Settlement claims cover EVERY street of the settlement:
-  // pipeline-derived ones ("Белосавци" = the whole village) anchor on one street and are
-  // marked via review_reason; reviewer picks carry a tagged "sett:<id>" directly.
   const segStreets = new Map<number, string[]>(); // seg id -> register street ids
   for (const s of segs) {
     const eff = effStreet(s);
@@ -277,6 +275,12 @@ export async function pointsForStation(db: D1Database, stationId: number) {
       segStreets.set(s.id, [eff]);
     }
   }
+  return segStreets;
+}
+
+export async function pointsForStation(db: D1Database, stationId: number) {
+  const segs = await getSegments(db, stationId);
+  const segStreets = await resolveSegStreets(db, segs);
   const streetIds = [...new Set([...segStreets.values()].flat())];
   if (streetIds.length === 0) return { type: "FeatureCollection", features: [] };
 
@@ -325,6 +329,34 @@ export async function pointsForStation(db: D1Database, stationId: number) {
           },
         });
       }
+    }
+  }
+  return { type: "FeatureCollection", features };
+}
+
+// Stored line geometry for a station's segments whose street has no addresses (so it
+// produces no points) — lets the UI show WHERE such a street is even though it can't
+// be covered by address points. Each feature carries its segment_id for highlighting.
+export async function streetLinesForStation(db: D1Database, stationId: number) {
+  const segs = await getSegments(db, stationId);
+  const segStreets = await resolveSegStreets(db, segs);
+  const streetIds = [...new Set([...segStreets.values()].flat())];
+  if (streetIds.length === 0) return { type: "FeatureCollection", features: [] };
+
+  const placeholders = streetIds.map(() => "?").join(",");
+  const { results } = await db
+    .prepare(`SELECT street_id, geojson FROM street_geometry WHERE street_id IN (${placeholders})`)
+    .bind(...streetIds)
+    .all<{ street_id: string; geojson: string }>();
+  const byStreet = new Map((results ?? []).map((r) => [r.street_id, r.geojson]));
+
+  const features: unknown[] = [];
+  for (const seg of segs) {
+    const ids = segStreets.get(seg.id);
+    if (!ids) continue;
+    for (const sid of ids) {
+      const gj = byStreet.get(sid);
+      if (gj) features.push({ type: "Feature", geometry: JSON.parse(gj), properties: { segment_id: seg.id } });
     }
   }
   return { type: "FeatureCollection", features };

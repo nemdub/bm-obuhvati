@@ -11,7 +11,7 @@
   }).addTo(map);
   map.setView([44.0, 20.9], 7);
 
-  let pointsLayer = null, polygonLayer = null, neighborsLayer = null, boundaryLayer = null;
+  let pointsLayer = null, polygonLayer = null, neighborsLayer = null, boundaryLayer = null, streetLinesLayer = null;
   let highlightSeg = null;
 
   function pointStyle(f) {
@@ -31,6 +31,22 @@
     };
   }
 
+  // Street centerlines for streets with no addresses (no points to draw): faint by
+  // default, highlighted when their segment is focused.
+  function streetLineStyle(f) {
+    const active = highlightSeg && f.properties.segment_id === highlightSeg;
+    const dim = highlightSeg && !active;
+    return {
+      color: active ? "#1565c0" : "#ef6c00",
+      weight: active ? 5 : 3,
+      opacity: dim ? 0.3 : active ? 1 : 0.7,
+      dashArray: active ? null : "5 5",
+    };
+  }
+  function refreshStreetLines() {
+    if (streetLinesLayer) streetLinesLayer.setStyle(streetLineStyle);
+  }
+
   let toastTimer = null;
   function toast(msg) {
     let el = document.getElementById("toast");
@@ -45,18 +61,23 @@
     toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
   }
 
-  // Highlight a segment's points and zoom to them; null clears + fits all points.
+  // Highlight a segment's points (and street line, if it has no addresses) and zoom to
+  // them; null clears + fits all points.
   function focusSegment(segId) {
     refreshPoints();
-    if (!pointsLayer) return;
+    refreshStreetLines();
     if (segId == null) {
-      const b = pointsLayer.getBounds();
-      if (b.isValid()) map.fitBounds(b, { padding: [30, 30] });
+      const b = pointsLayer && pointsLayer.getBounds();
+      if (b && b.isValid()) map.fitBounds(b, { padding: [30, 30] });
       return;
     }
     const bounds = L.latLngBounds([]);
-    pointsLayer.eachLayer((l) => {
+    if (pointsLayer) pointsLayer.eachLayer((l) => {
       if (l.feature && l.feature.properties.segment_id === segId) bounds.extend(l.getLatLng());
+    });
+    // Streets with no addresses have no points — fall back to their stored centerline.
+    if (streetLinesLayer) streetLinesLayer.eachLayer((l) => {
+      if (l.feature && l.feature.properties.segment_id === segId) bounds.extend(l.getBounds());
     });
     if (bounds.isValid()) {
       map.fitBounds(bounds, { padding: [40, 40], maxZoom: 17 });
@@ -66,9 +87,10 @@
   }
 
   async function loadMap() {
-    const [pts, poly] = await Promise.all([
+    const [pts, poly, lines] = await Promise.all([
       fetch(api("/points.geojson")).then((r) => r.json()),
       fetch(api("/polygon.geojson")).then((r) => r.json()),
+      fetch(api("/street-lines.geojson")).then((r) => r.json()),
     ]);
 
     if (boundaryLayer) map.removeLayer(boundaryLayer);
@@ -83,6 +105,9 @@
     polygonLayer = poly.polygon
       ? L.geoJSON({ type: "Feature", geometry: poly.polygon }, { style: { color: "#1565c0", weight: 2, fillOpacity: 0.12 } }).addTo(map)
       : null;
+
+    if (streetLinesLayer) map.removeLayer(streetLinesLayer);
+    streetLinesLayer = L.geoJSON(lines, { style: streetLineStyle }).addTo(map);
 
     if (pointsLayer) map.removeLayer(pointsLayer);
     pointsLayer = L.geoJSON(pts, {
@@ -100,6 +125,8 @@
     const b = pointsLayer.getBounds();
     if (b.isValid()) map.fitBounds(b, { padding: [30, 30] });
     else if (polygonLayer) map.fitBounds(polygonLayer.getBounds(), { padding: [30, 30] });
+    else if (streetLinesLayer && streetLinesLayer.getBounds().isValid())
+      map.fitBounds(streetLinesLayer.getBounds(), { padding: [30, 30] });
   }
 
   function refreshPoints() {
