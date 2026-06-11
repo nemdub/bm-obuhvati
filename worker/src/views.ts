@@ -139,7 +139,6 @@ export function stationsView(
         ${s.address_cyr ? html`<div class="addr-sub">${tr(s.address_cyr, script)}</div>` : ""}</td>
       <td class="num">${s.seg_count}</td>
       <td class="num">${s.review_count > 0 ? html`<span class="badge warn">${s.review_count}</span>` : "0"}</td>
-      <td class="num">${s.has_polygon ? html`<span class="ok-mark">✓</span>` : html`<span class="badge warn">${t("none")}</span>`}</td>
       <td class="num">${s.reviewed ? html`<span class="badge ok">✓</span>` : ""}${s.dirty ? html`<span class="badge dirty">⟳</span>` : ""}</td>
     </tr>`
   );
@@ -162,7 +161,7 @@ export function stationsView(
           <th>${t("name")}</th>
           <th class="num">${t("segments")}</th>
           <th class="num sortable" data-col="3">${t("needsReview")} <span class="arrow"></span></th>
-          <th class="num">${t("polygon")}</th><th class="num">${t("reviewed")}</th>
+          <th class="num">${t("reviewed")}</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>

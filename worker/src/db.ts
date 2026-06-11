@@ -155,12 +155,10 @@ export async function listStations(db: D1Database, muniId: string) {
               COUNT(DISTINCT cs.id) AS seg_count,
               COALESCE(SUM(CASE WHEN cs.needs_review = 1 AND COALESCE(o.reviewed, 0) = 0
                                 THEN 1 ELSE 0 END), 0) AS review_count,
-              CASE WHEN p.station_id IS NULL THEN 0 ELSE 1 END AS has_polygon,
               COALESCE(st.reviewed, 0) AS reviewed, COALESCE(st.dirty, 0) AS dirty
          FROM polling_stations ps
          LEFT JOIN coverage_segments cs ON cs.station_id = ps.id
          LEFT JOIN segment_overrides o ON o.segment_id = cs.id
-         LEFT JOIN polygons p ON p.station_id = ps.id
          LEFT JOIN station_status st ON st.station_id = ps.id
         WHERE ps.municipality_id = ?
         GROUP BY ps.id
