@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .normalize import normalize_suffix
+from .normalize import normalize_street, normalize_suffix
 from .transliterate import nfc
 
 _WS = re.compile(r"\s+")
@@ -138,6 +138,41 @@ def _split_on_connector(words: list[str]) -> list[list[str]]:
     return out
 
 
+def _merge_street_connectors(pieces: list[list[str]], is_street) -> list[list[str]]:
+    """Re-join clauses split on 'и' when the joined name is a real register street.
+
+    Some street names contain a literal "и" ("Зрињског и Франкопана", "Трг Јакаба и
+    Комора"). `_split_on_connector` would split those into two phantom streets. When a
+    register-membership predicate is supplied, a name-only clause is merged with the
+    following clause iff "<clause> и <next-name>" normalizes to a known street in the
+    station's municipality — so genuine list connectors ("Антонија Хаџића и Целовечка",
+    two real streets) are left split while compound names are kept whole."""
+    if is_street is None or len(pieces) < 2:
+        return pieces
+    out: list[list[str]] = []
+    i = 0
+    while i < len(pieces):
+        cur = pieces[i]
+        # Only a clause with no number tokens can be the left side of a compound name
+        # (a numbered claim ends the street name before the 'и').
+        while i + 1 < len(pieces) and all(not is_number_side(w) for w in cur):
+            nxt = pieces[i + 1]
+            prefix: list[str] = []
+            for w in nxt:
+                # The street name ends at the first number or parenthetical alternate name
+                # ("Трг Јакаба и Комора (Трг октобарске револуције) 28-30").
+                if is_number_side(w) or w.startswith("("):
+                    break
+                prefix.append(w)
+            if not prefix or not is_street(normalize_street(" ".join(cur + ["и"] + prefix))):
+                break
+            cur = cur + ["и"] + nxt
+            i += 1
+        out.append(cur)
+        i += 1
+    return out
+
+
 def _new_segment(settlement: str, name_words: list[str], num_words: list[str]) -> Segment:
     street = " ".join(name_words).strip()
     kind = "named_block" if street.upper().startswith("БЛОК") else "street_numbers"
@@ -150,7 +185,7 @@ def _new_segment(settlement: str, name_words: list[str], num_words: list[str]) -
 
 
 # ── Compact dialect ─────────────────────────────────────────────────────────
-def parse_compact(text: str, settlement: str = "") -> list[Segment]:
+def parse_compact(text: str, settlement: str = "", is_street=None) -> list[Segment]:
     text = collapse(text).rstrip(". ")
     fragments = [f.strip() for f in text.split(",") if f.strip()]
     segments: list[Segment] = []
@@ -179,7 +214,7 @@ def parse_compact(text: str, settlement: str = "") -> list[Segment]:
         if not rest:
             continue
 
-        for piece in _split_on_connector(rest):
+        for piece in _merge_street_connectors(_split_on_connector(rest), is_street):
             j = 0
             while j < len(piece):
                 if not is_number_side(piece[j]):
@@ -269,10 +304,14 @@ def parse_structured(text: str) -> list[Segment]:
 _DEO_GLUE = re.compile(r"(?i)\b(део)(\d)")
 
 
-def parse_coverage(text: str) -> list[Segment]:
-    """Detect dialect and parse the coverage cell into segments."""
+def parse_coverage(text: str, is_street=None) -> list[Segment]:
+    """Detect dialect and parse the coverage cell into segments.
+
+    `is_street(normalized_name) -> bool`, when supplied, lets the compact parser keep
+    street names that contain a literal "и" ("Зрињског и Франкопана") whole instead of
+    splitting them on the connector (see `_merge_street_connectors`)."""
     if not text or not text.strip():
         return []
     text = _DEO_GLUE.sub(r"\1 \2", text)
     is_structured = bool(_ULICA.search(text) and _BROJEVI.search(text))
-    return parse_structured(text) if is_structured else parse_compact(text)
+    return parse_structured(text) if is_structured else parse_compact(text, is_street=is_street)

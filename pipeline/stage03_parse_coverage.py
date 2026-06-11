@@ -33,9 +33,25 @@ def main() -> int:
     if args.municipality:
         stations = stations.filter(pl.col("municipality_id") == args.municipality)
 
+    # Register street names (per municipality group rep) that contain a literal "и", so the
+    # compact parser keeps compound names like "Зрињског и Франкопана" whole instead of
+    # splitting them on the connector into two phantom streets.
+    streets = pl.read_parquet(config.STREETS_PARQUET)
+    settlements = pl.read_parquet(config.SETTLEMENTS_PARQUET)
+    sett_to_muni = dict(zip(settlements["id"], settlements["municipality_id"]))
+    muni_and_streets: dict[str, set[str]] = {}
+    for set_id, norm in zip(streets["settlement_id"], streets["name_norm"]):
+        if "И" not in norm.split():
+            continue
+        muni = sett_to_muni.get(set_id)
+        gmuni = config.group_rep(muni) if muni else muni
+        muni_and_streets.setdefault(gmuni, set()).add(norm)
+
     rows: list[dict] = []
     for st in stations.iter_rows(named=True):
-        for idx, seg in enumerate(parse_coverage(st["raw_coverage_text"])):
+        muni_streets = muni_and_streets.get(config.group_rep(st["municipality_id"]), set())
+        is_street = muni_streets.__contains__
+        for idx, seg in enumerate(parse_coverage(st["raw_coverage_text"], is_street=is_street)):
             rows.append({
                 "id": st["id"] * 1000 + idx,
                 "station_id": st["id"],
