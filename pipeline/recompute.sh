@@ -74,23 +74,21 @@ else
 fi
 
 if [ "$IMPORT" = 1 ]; then
-  echo "-- importing derived tables into remote D1"
-  cd "$DIR/../worker"
-  if npx wrangler d1 execute bm-obuhvati --remote --file="$DERIVED_SQL" \
-       >"$DIR/artifacts/d1_import.log" 2>&1; then
-    grep -E "rows_written|error" "$DIR/artifacts/d1_import.log" || true
+  echo "-- importing derived tables into remote D1 (chunked, under D1's CPU limit)"
+  if "$DIR/d1_apply.sh" "$DERIVED_SQL"; then
     # Import succeeded -> clear the dirty flag for the snapshotted stations (race-safe).
     N="$("$PY" "$DIR/dirty_scope.py" clear-sql)"
     if [ "$N" -gt 0 ] 2>/dev/null; then
       echo "-- clearing dirty flag for $N station(s)"
+      cd "$DIR/../worker"
       npx wrangler d1 execute bm-obuhvati --remote --file="$DIR/artifacts/clear_dirty.sql" \
         | grep -E "rows_written|error" || true
     else
       echo "-- no dirty flags to clear"
     fi
   else
-    echo "!! import failed -- NOT clearing dirty flags; see artifacts/d1_import.log" >&2
-    cat "$DIR/artifacts/d1_import.log" >&2
+    echo "!! import failed -- NOT clearing dirty flags. Each chunk is atomic and the" >&2
+    echo "   dump is delete+insert, so just re-run: ./recompute.sh --only-dirty" >&2
     exit 1
   fi
 fi
