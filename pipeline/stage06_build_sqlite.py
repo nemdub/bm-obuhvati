@@ -59,6 +59,9 @@ TABLES: dict[str, tuple[Path, list[str]]] = {
     "muni_boundaries": (config.MUNI_BOUNDARIES_PARQUET, [
         "municipality_id", "geojson",
     ]),
+    "street_geometry": (config.STREET_GEOMETRY_PARQUET, [
+        "street_id", "geojson",
+    ]),
 }
 
 # Three load groups (avoids FK violations without relying on PRAGMA toggles, which
@@ -87,12 +90,13 @@ def sql_literal(v: object) -> str:
     return f"'{s}'"
 
 
-def write_inserts(f, df: pl.DataFrame, table: str, cols: list[str]) -> int:
+def write_inserts(f, df: pl.DataFrame, table: str, cols: list[str], verb: str = "INSERT") -> int:
     """Batched multi-row INSERTs, flushed by row count OR byte budget (whichever first),
-    so wide rows (polygons/segments) don't blow the statement-size cap."""
+    so wide rows (polygons/segments) don't blow the statement-size cap. ``verb`` lets the
+    reference group use ``INSERT OR IGNORE`` (idempotent, additive on the live DB)."""
     rows = df.select(cols).rows()
     col_list = ", ".join(cols)
-    header = f"INSERT INTO {table} ({col_list}) VALUES\n"
+    header = f"{verb} INTO {table} ({col_list}) VALUES\n"
     buf: list[str] = []
     size = 0
 
@@ -114,7 +118,7 @@ def write_inserts(f, df: pl.DataFrame, table: str, cols: list[str]) -> int:
 
 
 def dump_group(present: dict[str, pl.DataFrame], insert_order: list[str],
-               delete_order: list[str], out: Path) -> dict[str, int]:
+               delete_order: list[str], out: Path, verb: str = "INSERT") -> dict[str, int]:
     counts: dict[str, int] = {}
     with out.open("w", encoding="utf-8") as f:
         for table in delete_order:
@@ -122,7 +126,7 @@ def dump_group(present: dict[str, pl.DataFrame], insert_order: list[str],
                 f.write(f"DELETE FROM {table};\n")
         for table in insert_order:
             if table in present:
-                counts[table] = write_inserts(f, present[table], table, TABLES[table][1])
+                counts[table] = write_inserts(f, present[table], table, TABLES[table][1], verb)
     return counts
 
 
@@ -309,11 +313,13 @@ def main() -> int:
         print(f"  -> {out}  ({len(station_ids)} stations, {len(muni_ids)} munis)")
         return 0
 
-    # Reference data (insert-only).
+    # Reference data (insert-only). INSERT OR IGNORE so re-running against an
+    # already-loaded D1 only adds new rows (e.g. newly-registered streets) without
+    # PK conflicts; correct for a fresh load too (empty tables).
     ref_present = {t: present[t] for t in REFERENCE if t in present}
     if ref_present:
         path = config.ARTIFACTS_DIR / "import_reference.sql"
-        counts = dump_group(ref_present, REFERENCE, [], path)
+        counts = dump_group(ref_present, REFERENCE, [], path, verb="INSERT OR IGNORE")
         for t, n in counts.items():
             print(f"  {t}: {n:,} rows")
         print(f"  -> {path}")
@@ -347,6 +353,15 @@ def main() -> int:
             ["muni_boundaries"], ["muni_boundaries"], path,
         )
         print(f"  muni_boundaries: {counts['muni_boundaries']:,} rows -> {path}")
+
+    # Street line geometry for no-house streets (re-runnable, FK-referenced by nothing -> own file).
+    if "street_geometry" in present:
+        path = config.ARTIFACTS_DIR / "import_street_geometry.sql"
+        counts = dump_group(
+            {"street_geometry": present["street_geometry"]},
+            ["street_geometry"], ["street_geometry"], path,
+        )
+        print(f"  street_geometry: {counts['street_geometry']:,} rows -> {path}")
 
     build_sqlite(present)
     print(f"  built {config.SQLITE_OUT}")
