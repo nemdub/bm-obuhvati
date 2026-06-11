@@ -156,7 +156,7 @@ def affected_scope(municipalities: set[str]) -> tuple[list[int], list[str]]:
 # own — so the partial import is emitted as per-station BATCHES sized by link count, each
 # delimited by a `-- CHUNK` marker that d1_apply.sh runs as its own execute. ~4k links of
 # delete + ~4k of insert per chunk stays well under the limit.
-PARTIAL_LINK_BUDGET = 4000   # links touched (delete+insert) per chunk
+PARTIAL_LINK_BUDGET = 2000   # links touched (delete+insert) per chunk
 PARTIAL_MAX_STATIONS = 250   # also cap stations/chunk so a sparse batch can't grow an
                              # oversized IN(...) list / huge cumulative delete
 CHUNK_MARKER = "-- CHUNK\n"
