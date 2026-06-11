@@ -84,11 +84,18 @@ tr.city-child td:first-child { padding-left: 30px; }
 .source {
   position: sticky; top: 0; z-index: 5;
   background: #fafbfc; border: 1px solid var(--line); border-radius: 6px;
-  padding: 8px 10px; margin: 8px 0; max-height: 30vh; overflow: auto;
+  padding: 8px 10px; margin: 16px 0 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,.06);
 }
+/* Mask the panel's top padding strip while the source is pinned, so the scrolling
+   segments below don't show through the gap above the floating card. */
+.source::before {
+  content: ""; position: absolute;
+  left: -1px; right: -1px; top: -17px; height: 16px;
+  background: var(--panel);
+}
 .source-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin-bottom: 4px; }
-.source-text { font-size: 13px; line-height: 1.5; }
+.source-text { font-size: 13px; line-height: 1.5; max-height: 25vh; overflow: auto; }
 
 .mapwrap { position: sticky; top: 18px; }
 .polymeta { font-size: 13px; color: var(--muted); margin-bottom: 6px; }

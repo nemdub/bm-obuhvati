@@ -117,6 +117,13 @@ numbers; save / revert-to-machine / mark-reviewed), and a Leaflet map showing ma
 address points (colored by confidence) and the coverage polygon with neighbors for
 context. `?script=lat|cyr` toggles the script (cookie-persisted).
 
+A street the parser couldn't match can be (re)assigned to a register street via the
+per-segment street picker, or — when it genuinely isn't in the register — marked
+**"Doesn't exist"**. That resolves the segment (out of the review queue) and stores the
+`"none"` sentinel in `segment_overrides.manual_street_id` so no addresses/polygon are
+built for it; the pipeline honors the same sentinel on recompute (drops any machine
+match). It is revertable like any manual edit.
+
 ## Known limitations / where review concentrates
 
 1. **Amendment formats.** Only the Subotica-style amendment phrasing is parsed; the other
