@@ -19,8 +19,13 @@
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PY="$DIR/../.venv/bin/python"
+# Statements per chunk. Each statement is byte-capped (50KB) and row-capped (500) by stage06,
+# so a chunk is ~ STMTS×50KB worst case. 80 keeps each execute well under D1's per-execution
+# CPU limit while cutting the chunk count ~4x. (The old default of 20 was tuned for the era
+# when each run also churned ~1.9M station_address_links rows — those giant deletes tripped
+# D1's storage watchdog and are no longer shipped, so coarser chunks are safe.)
 SQL="$1"
-STMTS="${2:-20}"
+STMTS="${2:-80}"
 RETRIES="${D1_RETRIES:-6}"
 PACE="${D1_PACE_SECS:-2}"
 [ -f "$SQL" ] || { echo "d1_apply: no such file: $SQL" >&2; exit 2; }

@@ -71,11 +71,17 @@ TABLES: dict[str, tuple[Path, list[str]]] = {
 #   addresses — insert-only, the one-time heavy load.
 #   DERIVED   — re-runnable each pipeline pass: DELETE child->parent, INSERT parent->child.
 REFERENCE = ["municipalities", "settlements", "streets"]
+# `station_address_links` (~1.9M rows) is built LOCALLY (stage05 derives Voronoi polygons
+# from it) but is deliberately NOT shipped to D1: the Worker never queries it — it computes
+# coverage points live from `addresses WHERE street_id IN (...)` (db.ts `pointsForStation`),
+# reads geometry from `polygons`, and the matched-address count from `polygons.point_count`.
+# Excluding it cuts the derived import from ~1.96M rows to ~73k (segments + polygons), so a
+# plain full reload is fast and robust (no chunked-link import, no `--only-dirty` reconcile).
 DERIVED_INSERT_ORDER = [
-    "polling_stations", "coverage_segments", "amendments", "station_address_links", "polygons",
+    "polling_stations", "coverage_segments", "amendments", "polygons",
 ]
 DERIVED_DELETE_ORDER = [
-    "station_address_links", "polygons", "amendments", "coverage_segments", "polling_stations",
+    "polygons", "amendments", "coverage_segments", "polling_stations",
 ]
 
 
