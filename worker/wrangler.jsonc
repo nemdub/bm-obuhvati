@@ -1,27 +1,31 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "bm-obuhvati",
-  "main": "src/index.ts",
-  "compatibility_date": "2025-06-01",
-  "observability": {
-    "enabled": true
-  },
-  "assets": {
-    "directory": "./public",
-    "binding": "ASSETS"
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "bm-obuhvati",
-      "database_id": "69196081-e732-4fb3-be95-f63bb874aa87",
-      "migrations_dir": "migrations"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "POLY",
-      "bucket_name": "bm-obuhvati-polygons"
-    }
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "bm-obuhvati",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-06-01",
+	"observability": {
+		"enabled": true
+	},
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "bm-obuhvati",
+			"database_id": "69196081-e732-4fb3-be95-f63bb874aa87",
+			"migrations_dir": "migrations"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "POLY",
+			"bucket_name": "bm-obuhvati-polygons"
+		},
+		{
+			"bucket_name": "bm-obuhvati-polygons",
+			"binding": "bm_obuhvati_polygons"
+		}
+	]
 }
