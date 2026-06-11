@@ -115,6 +115,12 @@ tr.city-child td:first-child { padding-left: 30px; }
 .mini { border: 1px solid var(--line); background: #fafbfc; border-radius: 5px; cursor: pointer; padding: 2px 8px; }
 .mini.add { font-size: 12px; color: var(--blue); margin-top: 2px; }
 .seg-actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+.muni-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.export-bar { display: flex; align-items: center; gap: 8px; }
+.export-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.btn-export { display: inline-block; text-decoration: none; border: 1px solid var(--line); background: #fafbfc;
+  color: var(--ink); border-radius: 6px; padding: 5px 12px; font-size: 13px; }
+.btn-export:hover { background: #eef4fb; border-color: var(--blue); color: var(--blue); }
 .btn { border: 1px solid var(--line); background: #fafbfc; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; }
 .btn.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
 .flash { color: var(--ok); font-size: 12px; }

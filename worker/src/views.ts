@@ -147,7 +147,14 @@ export function stationsView(
     script,
     tr(muni.name_cyr, script),
     html`<p class="crumb"><a href="/">${t("municipalities")}</a> › ${tr(muni.name_cyr, script)}</p>
-      <h1>${t("stations")}</h1>
+      <div class="muni-head">
+        <h1>${t("stations")}</h1>
+        <div class="export-bar">
+          <span class="export-label">${t("exportData")}:</span>
+          <a class="btn-export" download href="/api/m/${muni.id}/export.geojson?script=${script}">${t("exportGeojson")}</a>
+          <a class="btn-export" download href="/api/m/${muni.id}/export.kml?script=${script}">${t("exportKml")}</a>
+        </div>
+      </div>
       <div id="muni-map"></div>
       <table class="list" id="stations-table">
         <thead><tr>

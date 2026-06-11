@@ -8,6 +8,7 @@ import {
   muniBoundaries, allBoundaries, summaryStats, settIdOfPick,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
+import { buildGeoJSON, buildKML, muniSlug, type ExportRow } from "./export";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -205,6 +206,30 @@ app.get("/api/m/:id/polygons.geojson", async (c) => {
     })),
     boundaries: bounds.map((b) => JSON.parse(b.geojson)),
   });
+});
+
+// Downloadable per-municipality coverage exports. Shape mirrors
+// data/exports/novi-beograd-automated.geojson (OKRUG/RBR omitted — not in our data).
+app.get("/api/m/:id/export.geojson", async (c) => {
+  const script = getScript(c);
+  const id = c.req.param("id");
+  const [muni, rows] = await Promise.all([getMunicipality(c.env.DB, id), allMuniPolygons(c.env.DB, id)]);
+  if (!muni) return c.notFound();
+  const body = JSON.stringify(buildGeoJSON(rows as ExportRow[], muni.name_cyr, script));
+  c.header("Content-Type", "application/geo+json; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="${muniSlug(muni.name_lat)}.geojson"`);
+  return c.body(body);
+});
+
+app.get("/api/m/:id/export.kml", async (c) => {
+  const script = getScript(c);
+  const id = c.req.param("id");
+  const [muni, rows] = await Promise.all([getMunicipality(c.env.DB, id), allMuniPolygons(c.env.DB, id)]);
+  if (!muni) return c.notFound();
+  const body = buildKML(rows as ExportRow[], muni.name_cyr, script);
+  c.header("Content-Type", "application/vnd.google-earth.kml+xml; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="${muniSlug(muni.name_lat)}.kml"`);
+  return c.body(body);
 });
 
 // All municipality outlines for the homepage overview. Static register data, so it is
