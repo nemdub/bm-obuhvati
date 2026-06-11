@@ -4,7 +4,7 @@ import { tr } from "./translit";
 import { REVIEW_REASONS } from "./i18n";
 import {
   listMunicipalities, getMunicipality, listStations, getStation, getSegments,
-  getPolygon, pointsForStation, streetLinesForStation, muniPolygons, allMuniPolygons, effectiveParsed, searchStreets,
+  pointsForStation, streetLinesForStation, allMuniPolygons, effectiveParsed, searchStreets,
   muniBoundaries, allBoundaries, summaryStats, settIdOfPick, NONE_PICK,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
@@ -26,7 +26,7 @@ app.use("*", async (c, next) => {
 // ── Pages ───────────────────────────────────────────────────────────────────
 // Serbian abeceda ordering + Belgrade nesting are handled in the view.
 app.get("/", async (c) => {
-  const [munis, stats] = await Promise.all([listMunicipalities(c.env.DB), summaryStats(c.env.DB)]);
+  const [munis, stats] = await Promise.all([listMunicipalities(c.env.DB), summaryStats(c.env.POLY)]);
   return c.html(municipalitiesView(c, munis, stats));
 });
 
@@ -192,7 +192,7 @@ app.get("/api/s/:id/streets", async (c) => {
 app.get("/api/m/:id/polygons.geojson", async (c) => {
   const script = getScript(c);
   const [rows, bounds] = await Promise.all([
-    allMuniPolygons(c.env.DB, c.req.param("id")),
+    allMuniPolygons(c.env.POLY, c.req.param("id")),
     muniBoundaries(c.env.DB, c.req.param("id")),
   ]);
   return c.json({
@@ -216,7 +216,7 @@ app.get("/api/m/:id/polygons.geojson", async (c) => {
 app.get("/api/m/:id/export.geojson", async (c) => {
   const script = getScript(c);
   const id = c.req.param("id");
-  const [muni, rows] = await Promise.all([getMunicipality(c.env.DB, id), allMuniPolygons(c.env.DB, id)]);
+  const [muni, rows] = await Promise.all([getMunicipality(c.env.DB, id), allMuniPolygons(c.env.POLY, id)]);
   if (!muni) return c.notFound();
   const body = JSON.stringify(buildGeoJSON(rows as ExportRow[], muni.name_cyr, script));
   c.header("Content-Type", "application/geo+json; charset=utf-8");
@@ -227,7 +227,7 @@ app.get("/api/m/:id/export.geojson", async (c) => {
 app.get("/api/m/:id/export.kml", async (c) => {
   const script = getScript(c);
   const id = c.req.param("id");
-  const [muni, rows] = await Promise.all([getMunicipality(c.env.DB, id), allMuniPolygons(c.env.DB, id)]);
+  const [muni, rows] = await Promise.all([getMunicipality(c.env.DB, id), allMuniPolygons(c.env.POLY, id)]);
   if (!muni) return c.notFound();
   const body = buildKML(rows as ExportRow[], muni.name_cyr, script);
   c.header("Content-Type", "application/vnd.google-earth.kml+xml; charset=utf-8");
@@ -260,17 +260,19 @@ app.get("/api/s/:id/street-lines.geojson", async (c) => {
 
 app.get("/api/s/:id/polygon.geojson", async (c) => {
   const id = Number(c.req.param("id"));
-  const poly = await getPolygon(c.env.DB, id);
   const st = await getStation(c.env.DB, id);
-  const [neighbors, bounds] = st
+  // One R2 read of the muni blob yields this station's polygon AND its neighbours.
+  const [rows, bounds] = st
     ? await Promise.all([
-        muniPolygons(c.env.DB, st.municipality_id, id),
+        allMuniPolygons(c.env.POLY, st.municipality_id),
         muniBoundaries(c.env.DB, st.municipality_id),
       ])
     : [[], []];
+  const self = rows.find((r) => r.station_id === id);
+  const neighbors = rows.filter((r) => r.station_id !== id);
   return c.json({
-    polygon: poly ? JSON.parse(poly.geojson) : null,
-    meta: poly ? { area_m2: poly.area_m2, point_count: poly.point_count, computed_at: poly.computed_at } : null,
+    polygon: self ? JSON.parse(self.geojson) : null,
+    meta: self ? { area_m2: self.area_m2, point_count: self.point_count, computed_at: self.computed_at } : null,
     neighbors: neighbors.map((n) => JSON.parse(n.geojson)),
     boundaries: bounds.map((b) => JSON.parse(b.geojson)),
   });

@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 from pathlib import Path
 
@@ -71,17 +72,19 @@ TABLES: dict[str, tuple[Path, list[str]]] = {
 #   addresses — insert-only, the one-time heavy load.
 #   DERIVED   — re-runnable each pipeline pass: DELETE child->parent, INSERT parent->child.
 REFERENCE = ["municipalities", "settlements", "streets"]
-# `station_address_links` (~1.9M rows) is built LOCALLY (stage05 derives Voronoi polygons
-# from it) but is deliberately NOT shipped to D1: the Worker never queries it — it computes
-# coverage points live from `addresses WHERE street_id IN (...)` (db.ts `pointsForStation`),
-# reads geometry from `polygons`, and the matched-address count from `polygons.point_count`.
-# Excluding it cuts the derived import from ~1.96M rows to ~73k (segments + polygons), so a
-# plain full reload is fast and robust (no chunked-link import, no `--only-dirty` reconcile).
+# Two derived tables are built LOCALLY but deliberately NOT shipped to D1:
+#   `station_address_links` (~1.9M rows) — stage05 derives Voronoi polygons from it, but the
+#       Worker never queries it (coverage points are computed live from `addresses`).
+#   `polygons` (~7.4k rows / ~70MB of GeoJSON) — served from R2 instead (per-municipality
+#       blobs, see write_r2_blobs); the byte-heavy geometry has no business in D1.
+# What remains in the derived D1 dump is small text (segments + stations + amendments), so a
+# plain full reload is fast and robust — no chunked-link import, no `--only-dirty` reconcile.
+# Both tables are dropped from D1 by migration 0010; build_sqlite tolerates their absence.
 DERIVED_INSERT_ORDER = [
-    "polling_stations", "coverage_segments", "amendments", "polygons",
+    "polling_stations", "coverage_segments", "amendments",
 ]
 DERIVED_DELETE_ORDER = [
-    "polygons", "amendments", "coverage_segments", "polling_stations",
+    "amendments", "coverage_segments", "polling_stations",
 ]
 
 
@@ -261,6 +264,48 @@ def write_muni_meta(df: pl.DataFrame, out: Path) -> int:
     return n
 
 
+# Columns each per-municipality polygon blob carries — mirrors the old D1
+# `polygons ⋈ polling_stations` row exactly, so the Worker serves them unchanged.
+R2_BLOB_COLS = [
+    "station_id", "number", "name_cyr", "name_lat", "address_cyr", "address_lat",
+    "geojson", "area_m2", "point_count", "computed_at",
+]
+
+
+def write_r2_blobs(polys: pl.DataFrame, stations: pl.DataFrame, out_dir: Path) -> tuple[int, int]:
+    """Emit polygons as per-municipality GeoJSON blobs for R2 instead of D1 rows:
+    ``polygons/m/<muniId>.json`` = {"stations": [row, ...]} (sorted by number), plus
+    ``polygons/summary.json`` = {polygon_count, matched_addresses} for the homepage.
+
+    Keyed by the station's raw ``municipality_id`` — the same grouping the old
+    ``allMuniPolygons`` SQL used — so muni pages and the station map resolve identically.
+    `geojson` stays a STRING (the Worker JSON.parses it per feature), matching the prior
+    D1 contract. Returns (muni_count, polygon_count)."""
+    meta = stations.select(
+        ["id", "municipality_id", "number", "name_cyr", "name_lat", "address_cyr", "address_lat"]
+    )
+    df = polys.join(meta, left_on="station_id", right_on="id", how="inner")
+    m_dir = out_dir / "polygons" / "m"
+    m_dir.mkdir(parents=True, exist_ok=True)
+
+    muni_count = 0
+    poly_count = 0
+    matched = 0
+    for muni_id in df["municipality_id"].unique().to_list():
+        sub = df.filter(pl.col("municipality_id") == muni_id).sort("number")
+        rows = sub.select(R2_BLOB_COLS).to_dicts()
+        (m_dir / f"{muni_id}.json").write_text(
+            json.dumps({"stations": rows}, ensure_ascii=False), encoding="utf-8"
+        )
+        muni_count += 1
+        poly_count += len(rows)
+        matched += int(sub["point_count"].fill_null(0).sum())
+
+    summary = {"polygon_count": poly_count, "matched_addresses": matched}
+    (out_dir / "polygons" / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    return muni_count, poly_count
+
+
 def build_sqlite(present: dict[str, pl.DataFrame]) -> None:
     if config.SQLITE_OUT.exists():
         config.SQLITE_OUT.unlink()
@@ -268,7 +313,12 @@ def build_sqlite(present: dict[str, pl.DataFrame]) -> None:
     # Apply all migrations in order so the canonical SQLite matches the D1 schema.
     for mig in sorted(MIGRATIONS_DIR.glob("*.sql")):
         con.executescript(mig.read_text(encoding="utf-8"))
+    # A migration may DROP a table whose parquet we still build locally (polygons -> R2,
+    # station_address_links -> stage05-only); skip inserts for tables not in the schema.
+    schema_tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table, df in present.items():
+        if table not in schema_tables:
+            continue
         cols = TABLES[table][1]
         placeholders = ", ".join("?" * len(cols))
         con.executemany(
@@ -368,6 +418,12 @@ def main() -> int:
             ["street_geometry"], ["street_geometry"], path,
         )
         print(f"  street_geometry: {counts['street_geometry']:,} rows -> {path}")
+
+    # Polygons -> per-municipality R2 blobs (served from object storage, not D1).
+    if "polygons" in present and "polling_stations" in present:
+        r2_dir = config.ARTIFACTS_DIR / "r2"
+        mc, pc = write_r2_blobs(present["polygons"], present["polling_stations"], r2_dir)
+        print(f"  r2 polygon blobs: {mc} munis, {pc:,} polygons -> {r2_dir}/polygons/")
 
     build_sqlite(present)
     print(f"  built {config.SQLITE_OUT}")

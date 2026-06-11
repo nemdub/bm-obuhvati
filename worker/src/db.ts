@@ -233,10 +233,29 @@ export async function getSegments(db: D1Database, stationId: number): Promise<Se
   return segs;
 }
 
-export async function getPolygon(db: D1Database, stationId: number) {
-  return db.prepare("SELECT geojson, area_m2, point_count, computed_at FROM polygons WHERE station_id = ?")
-    .bind(stationId)
-    .first<{ geojson: string; area_m2: number; point_count: number; computed_at: string }>();
+/** One station's stored polygon plus the metadata the maps and exports need. Mirrors the
+ *  old `polygons ⋈ polling_stations` D1 row exactly, so every consumer is unchanged. */
+export interface PolyRow {
+  station_id: number;
+  number: number;
+  name_cyr: string;
+  name_lat: string;
+  address_cyr: string;
+  address_lat: string;
+  geojson: string; // GeoJSON MultiPolygon (occasionally Polygon), as a string
+  area_m2: number;
+  point_count: number;
+  computed_at: string;
+}
+
+/** Read a municipality's polygon blob from R2 (polygons/m/<muniId>.json). Polygons are
+ *  static between recomputes and byte-heavy, so they live in object storage, not D1.
+ *  Returns the stations array (pipeline-sorted by number) or [] if the blob is absent. */
+export async function muniPolyRows(bucket: R2Bucket, muniId: string): Promise<PolyRow[]> {
+  const obj = await bucket.get(`polygons/m/${muniId}.json`);
+  if (!obj) return [];
+  const data = await obj.json<{ stations: PolyRow[] }>();
+  return data.stations ?? [];
 }
 
 interface AddrRow {
@@ -362,17 +381,9 @@ export async function streetLinesForStation(db: D1Database, stationId: number) {
   return { type: "FeatureCollection", features };
 }
 
-export async function allMuniPolygons(db: D1Database, muniId: string) {
-  const { results } = await db
-    .prepare(
-      `SELECT p.station_id, ps.number, ps.name_cyr, ps.name_lat, ps.address_cyr, ps.address_lat, p.geojson
-         FROM polygons p JOIN polling_stations ps ON ps.id = p.station_id
-        WHERE ps.municipality_id = ?
-        ORDER BY ps.number`
-    )
-    .bind(muniId)
-    .all<{ station_id: number; number: number; name_cyr: string; name_lat: string; address_cyr: string; address_lat: string; geojson: string }>();
-  return results ?? [];
+/** All of a municipality's station polygons (for the overview map and exports). */
+export async function allMuniPolygons(bucket: R2Bucket, muniId: string): Promise<PolyRow[]> {
+  return muniPolyRows(bucket, muniId);
 }
 
 /** Search register streets AND settlements within a station's municipality, for the
@@ -419,15 +430,12 @@ export async function allBoundaries(db: D1Database) {
   return results ?? [];
 }
 
-/** Dataset-wide polygon totals for the homepage summary cards. */
-export async function summaryStats(db: D1Database) {
-  const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS polygon_count, COALESCE(SUM(point_count), 0) AS matched_addresses
-         FROM polygons`
-    )
-    .first<{ polygon_count: number; matched_addresses: number }>();
-  return row ?? { polygon_count: 0, matched_addresses: 0 };
+/** Dataset-wide polygon totals for the homepage summary cards. Precomputed by the pipeline
+ *  into polygons/summary.json (a full scan of R2 blobs would be wasteful on the hot path). */
+export async function summaryStats(bucket: R2Bucket) {
+  const obj = await bucket.get("polygons/summary.json");
+  if (!obj) return { polygon_count: 0, matched_addresses: 0 };
+  return obj.json<{ polygon_count: number; matched_addresses: number }>();
 }
 
 /** Official boundary outline(s) for a municipality — includes grouped members' outlines
@@ -444,14 +452,3 @@ export async function muniBoundaries(db: D1Database, muniId: string) {
   return results ?? [];
 }
 
-export async function muniPolygons(db: D1Database, muniId: string, excludeStation: number) {
-  const { results } = await db
-    .prepare(
-      `SELECT p.station_id, p.geojson
-         FROM polygons p JOIN polling_stations ps ON ps.id = p.station_id
-        WHERE ps.municipality_id = ? AND p.station_id != ?`
-    )
-    .bind(muniId, excludeStation)
-    .all<{ station_id: number; geojson: string }>();
-  return results ?? [];
-}
