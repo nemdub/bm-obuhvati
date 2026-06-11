@@ -73,6 +73,29 @@ def _ordinal_to_arabic(m: re.Match) -> str:
 # Latin letters that may appear in suffixes coming from the register's Latin column.
 _HAS_LATIN_RE = re.compile(r"[A-Za-zĐŽĆČŠđžćčš]")
 
+# Latin/Cyrillic homoglyphs: source docs occasionally type a visually identical Latin
+# letter inside an otherwise-Cyrillic word ("AПАТИН" with a Latin 'A'), so the word fails
+# to match its all-Cyrillic register form (its home settlement then can't be resolved).
+# Fold the Latin homoglyphs to Cyrillic, but ONLY in words that mix both scripts — pure-
+# Latin Roman numerals (VIII, XII) and the register's Latin house-letters stay untouched.
+_HOMOGLYPH_TRANS = str.maketrans({
+    "A": "А", "B": "В", "C": "С", "E": "Е", "H": "Н", "J": "Ј", "K": "К",
+    "M": "М", "O": "О", "P": "Р", "T": "Т", "X": "Х", "Y": "У",
+})
+_LATIN_LETTER_RE = re.compile(r"[A-Z]")
+_CYR_RANGE_RE = re.compile(r"[Ѐ-ӿ]")
+_WORD_RE = re.compile(r"\S+")
+
+
+def _fold_homoglyphs(s: str) -> str:
+    def fix(m: re.Match) -> str:
+        w = m.group(0)
+        if _LATIN_LETTER_RE.search(w) and _CYR_RANGE_RE.search(w):
+            return w.translate(_HOMOGLYPH_TRANS)
+        return w
+
+    return _WORD_RE.sub(fix, s)
+
 
 def normalize_street(name: str) -> str:
     """Build the Cyrillic matching key for a street name.
@@ -87,6 +110,7 @@ def normalize_street(name: str) -> str:
         s = s.replace(abbr, full)
     # Keep Cyrillic/Latin letters, digits and spaces; drop other punctuation.
     s = re.sub(r"[^0-9A-Za-zА-Яа-яЂЃЄЅІЇЈЉЊЋЌЎЏђѓєѕіїјљњћќўџ\s]", " ", s)
+    s = _fold_homoglyphs(s)
     s = _DR_RE.sub("ДОКТОРА", s)
     s = _ROMAN_RE.sub(_roman_to_arabic, s)
     s = _ORDINAL_RE.sub(_ordinal_to_arabic, s)
