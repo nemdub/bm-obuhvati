@@ -58,6 +58,8 @@ BOUNDARY_SIMPLIFY_TOL_M = 20.0  # simplification of municipality boundaries for 
 
 # ── Matching tuning ─────────────────────────────────────────────────────────
 STREET_FUZZY_MIN = 90       # rapidfuzz score below which a street match needs review
+STREET_FUZZY_MUNI_MIN = 93  # stricter cutoff for the muni-wide fuzzy fallback used only by
+                            # stations with no home settlement (Belgrade/Niš city-munis)
 
 # ── Manual overrides for doc filename -> municipality (Latin register name). ──
 # Auto-matching in stage02 handles most files; add corrections here when the

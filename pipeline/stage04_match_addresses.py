@@ -186,6 +186,33 @@ def _fuzzy(norm: str, names_map: dict[str, list[str]]) -> tuple[str, float] | No
     return None
 
 
+def _fuzzy_muni_unique(norm: str, names_map: dict[str, list[str]],
+                       threshold: float) -> tuple[str, float] | None:
+    """Municipality-wide fuzzy, used ONLY for stations with no resolvable home settlement
+    (Belgrade/Niš city-municipalities, whose addresses carry no settlement head, so the
+    settlement-scoped fuzzy never runs). Far stricter than settlement fuzzy: it fires only
+    when a SINGLE register name clears `threshold` and that name maps to a SINGLE street.
+    The uniqueness requirement is what keeps this from reintroducing the invented matches
+    that retired the blanket muni-wide fuzzy (a typo'd street that doesn't exist would, at
+    most, near-miss one real name — so it stays unresolved unless that lone candidate is
+    unambiguous and a reviewer confirms it)."""
+    if not names_map:
+        return None
+    nd = _DIGITS_RE.findall(norm)
+    hits = [
+        m for m in process.extract(norm, list(names_map.keys()), scorer=fuzz.WRatio,
+                                   score_cutoff=threshold, limit=5)
+        if _DIGITS_RE.findall(m[0]) == nd  # digit guard, as in _fuzzy
+    ]
+    if len(hits) != 1:
+        return None
+    name, score, _ = hits[0]
+    ids = names_map[name]
+    if len(ids) != 1:  # same name in multiple settlements of the muni — ambiguous, skip
+        return None
+    return ids[0], float(score)
+
+
 _PAREN_RE = re.compile(r"\(([^)]*)\)")
 # Normalized alias lookup: (municipality_id, normalized doc name) -> normalized register name.
 _ALIASES = {
@@ -283,6 +310,15 @@ def resolve_street(street_raw, muni, settlement_id, idx
         if len(ids) == 1:
             return ids[0], ("muni_fallback" if settlement_id else exact_method), 100.0, []
         return None, "ambiguous", 0.0, ids
+    # Municipality-wide fuzzy — ONLY for stations with no home settlement (Belgrade/Niš
+    # city-munis, whose addresses carry no settlement head, so the settlement-scoped fuzzy
+    # above never runs and a one-letter doc typo like "Михаила"->"Михајла" Пупина would
+    # otherwise fall through to no_match). Stricter cutoff + single-candidate guard; flagged
+    # 'fuzzy' so the reviewer sees the doc->register name discrepancy and confirms.
+    if not settlement_id:
+        hit = _fuzzy_muni_unique(primary, muni_scope, config.STREET_FUZZY_MUNI_MIN)
+        if hit:
+            return hit[0], "fuzzy", hit[1], []
     # Village-name coverage: some stations name a whole SETTLEMENT instead of streets
     # ("Белосавци" in Topola). If the name matches a settlement in the municipality,
     # LAST RESORT — only when no street matches anywhere in the municipality (otherwise it hijacks cross-settlement street matches); claim every street in it (extra ids ride in the 4th slot, method 'settlement').
