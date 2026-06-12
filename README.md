@@ -11,6 +11,9 @@ polygon via Voronoi tessellation, and exposes everything in a Serbian-language r
 
 - **Live app:** https://bm-obuhvati.dubravac-nemanja.workers.dev
 - Code and documentation are in English; the UI is in Serbian.
+- **Parsing & matching spec:** [`docs/parsing-matching/`](docs/parsing-matching/README.md) —
+  every parsing and matching rule, with input→output examples and rationale (the basis for
+  the unit‑test suite).
 
 ## Architecture
 
