@@ -25,6 +25,7 @@ export const STRINGS = {
   doesNotExist: "Улица не постоји",
   streetMissing: "Означено: не постоји",
   wholeStreet: "Цела улица",
+  bezBroja: "Без броја (бб)",
   ranges: "Распони",
   parityAll: "сви",
   parityOdd: "непарни",

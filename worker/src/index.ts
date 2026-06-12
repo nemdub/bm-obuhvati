@@ -108,12 +108,13 @@ app.put("/api/segments/:id", async (c) => {
   const segId = Number(c.req.param("id"));
   const body = await c.req.json<{
     intervals?: [number, number][]; singles?: [number, string][]; whole?: boolean;
-    reviewed?: boolean; street_id?: string | null;
+    bez_broja?: boolean; reviewed?: boolean; street_id?: string | null;
   }>();
   const manual = JSON.stringify({
     intervals: body.intervals ?? [],
     singles: body.singles ?? [],
     whole: !!body.whole,
+    bez_broja: !!body.bez_broja,
   });
   const seg = await c.env.DB.prepare("SELECT station_id FROM coverage_segments WHERE id = ?")
     .bind(segId).first<{ station_id: number }>();
@@ -144,7 +145,7 @@ app.delete("/api/segments/:id/manual", async (c) => {
 app.post("/api/s/:id/segments", async (c) => {
   const stationId = Number(c.req.param("id"));
   const body = await c.req.json<{
-    street_id: string; whole?: boolean;
+    street_id: string; whole?: boolean; bez_broja?: boolean;
     intervals?: unknown[]; singles?: unknown[];
   }>();
   if (!body.street_id) return c.json({ ok: false, error: "street_id required" }, 400);
@@ -157,6 +158,7 @@ app.post("/api/s/:id/segments", async (c) => {
     intervals: body.intervals ?? [],
     singles: body.singles ?? [],
     whole: body.whole ?? true,
+    bez_broja: !!body.bez_broja,
   });
   await c.env.DB.prepare(
     `INSERT INTO station_added_segments (station_id, street_id, manual_json, created_at)

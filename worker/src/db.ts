@@ -29,6 +29,8 @@ export interface ParsedCoverage {
   intervals: Interval[];
   singles: [number, string][];
   whole: boolean;
+  // "бб" (bez broja): also cover the street's no-number (house_num IS NULL) houses.
+  bez_broja: boolean;
   unknown_tokens?: string[];
 }
 
@@ -118,9 +120,12 @@ export function effectiveParsed(seg: SegmentRow): ParsedCoverage {
   const raw = seg.ov_json ?? seg.parsed_json;
   try {
     const p = JSON.parse(raw) as Partial<ParsedCoverage>;
-    return { intervals: p.intervals ?? [], singles: p.singles ?? [], whole: !!p.whole };
+    return {
+      intervals: p.intervals ?? [], singles: p.singles ?? [],
+      whole: !!p.whole, bez_broja: !!p.bez_broja,
+    };
   } catch {
-    return { intervals: [], singles: [], whole: false };
+    return { intervals: [], singles: [], whole: false, bez_broja: false };
   }
 }
 
@@ -326,7 +331,24 @@ export async function pointsForStation(db: D1Database, stationId: number) {
     const singles = new Set(parsed.singles.map(([n, s]) => `${n}|${s}`));
     const segAddrs = ids.flatMap((x) => byStreet.get(x) ?? []);
     for (const a of segAddrs) {
-      if (a.house_num === null || seen.has(a.id)) continue;
+      if (seen.has(a.id)) continue;
+      // No-number houses (house_num IS NULL): covered by a whole-street or "бб" claim only.
+      if (a.house_num === null) {
+        if (parsed.whole || parsed.bez_broja) {
+          seen.add(a.id);
+          features.push({
+            type: "Feature",
+            geometry: { type: "Point", coordinates: [a.lon, a.lat] },
+            properties: {
+              segment_id: seg.id,
+              house: a.house_raw,
+              confidence: seg.confidence,
+              needs_review: seg.needs_review,
+            },
+          });
+        }
+        continue;
+      }
       const inRange = parsed.intervals.some((iv) => houseInInterval(a.house_num!, a.house_suffix, iv));
       // Exact (num+suffix) match, or a bare number implying its suffixed variants
       // (5 -> 5а/5б/...). Cross-station "unless listed elsewhere" overrides are resolved

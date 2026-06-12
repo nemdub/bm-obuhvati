@@ -43,6 +43,9 @@ class Segment:
     singles: list[list] = field(default_factory=list)             # [[num, "suffix"], ...]
     unknown_tokens: list[str] = field(default_factory=list)
     whole: bool = False
+    # "бб" (bez broja / without number): the street's houses that carry no assigned number.
+    # Additive — a segment may have ranges/singles AND bez_broja.
+    bez_broja: bool = False
     dialect: str = "compact"
 
     def to_parsed(self) -> dict:
@@ -50,6 +53,7 @@ class Segment:
             "intervals": self.intervals,
             "singles": self.singles,
             "whole": self.whole,
+            "bez_broja": self.bez_broja,
             "unknown_tokens": self.unknown_tokens,
         }
 
@@ -76,6 +80,16 @@ def is_block_token(w: str) -> bool:
     return bool(_BLOCK_RE.match(w.strip(".,;")))
 
 
+# "бб" (bez broja / "without number"): a marker, not a house number — tolerant of dots and
+# case ('бб', 'ББ', 'бб.', 'б.б.') and the Latin form ('bb'). Kept on the number side so it
+# leaves the street name and becomes a `bez_broja` flag instead of a phantom street.
+_BB_RE = re.compile(r"^(?:бб|bb)$", re.IGNORECASE)
+
+
+def is_bb_token(w: str) -> bool:
+    return bool(_BB_RE.match(w.strip(".,;").replace(".", "")))
+
+
 def is_house_token(w: str) -> bool:
     """A house-number token starts with a digit and is not an ordinal ('20.', '8.')."""
     if not w or not w[0].isdigit():
@@ -86,14 +100,17 @@ def is_house_token(w: str) -> bool:
 
 
 def is_number_side(w: str) -> bool:
-    """Token belongs to the number side of a street clause (house number or block tag)."""
-    return is_house_token(w) or is_block_token(w)
+    """Token belongs to the number side of a street clause (house number, block tag, or 'бб')."""
+    return is_house_token(w) or is_block_token(w) or is_bb_token(w)
 
 
 def parse_number_token(tok: str, seg: Segment) -> None:
     """Classify one number token into the segment (range / single / unknown)."""
     t = tok.strip().strip(".,;").strip()
     if not t:
+        return
+    if is_bb_token(t):
+        seg.bez_broja = True
         return
     m = _RANGE.match(t)
     if m and m.group(3):
@@ -178,7 +195,7 @@ def _new_segment(settlement: str, name_words: list[str], num_words: list[str]) -
     kind = "named_block" if street.upper().startswith("БЛОК") else "street_numbers"
     seg = Segment(settlement_raw=settlement, street_raw=street, kind=kind, dialect="compact")
     _add_numbers(seg, num_words)
-    if not (seg.intervals or seg.singles or seg.unknown_tokens):
+    if not (seg.intervals or seg.singles or seg.unknown_tokens or seg.bez_broja):
         seg.whole = True
         seg.kind = "whole_street" if kind != "named_block" else kind
     return seg
@@ -292,8 +309,15 @@ def parse_structured(text: str) -> list[Segment]:
                 seg.whole = True
                 seg.kind = "whole_street"
         else:
-            seg = Segment(settlement_raw=settlement, street_raw=body.strip(),
-                          kind="whole_street", whole=True, dialect="structured")
+            # No 'бројеви': a whole street, but a trailing "бб" is the bez-broja marker,
+            # not part of the name ("Улица: Омладинских бригада бб").
+            name_words = body.split()
+            bez = False
+            while name_words and is_bb_token(name_words[-1]):
+                name_words.pop()
+                bez = True
+            seg = Segment(settlement_raw=settlement, street_raw=" ".join(name_words).strip(),
+                          kind="whole_street", whole=not bez, bez_broja=bez, dialect="structured")
         if seg.street_raw:
             segments.append(seg)
     return segments

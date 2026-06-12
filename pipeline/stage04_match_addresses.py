@@ -323,6 +323,10 @@ def _bounds_ok(num: int, suf: str, c: dict) -> bool:
 SPEC_EXACT_SINGLE = 3
 SPEC_IMPLIED_SINGLE = 2
 SPEC_INTERVAL = 1
+# bez_broja ("бб"): claims a street's no-number (house_num IS NULL) houses. It only ever
+# competes with whole/sett_whole for those NULL-house addresses (intervals/singles need a
+# number), so an explicit "бб" outranks a generic whole-street claim there.
+SPEC_BEZ_BROJA = 1
 SPEC_WHOLE = 0
 SPEC_SETT_WHOLE = -1  # village-name claim: yields to ANY street-level claim
 
@@ -346,15 +350,20 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
     conflicts: dict[int, set[int]] = {}
 
     for aid, num, suf in rows:
-        if num is None:
-            continue
         cands: list[tuple[int, dict]] = []
         for c in claims:
             k = c["kind"]
+            # whole / sett_whole cover every house including the no-number ones.
             if k == "whole":
                 cands.append((SPEC_WHOLE, c))
             elif k == "sett_whole":
                 cands.append((SPEC_SETT_WHOLE, c))
+            elif k == "bez_broja":
+                # "бб" claims ONLY the no-number houses (house_num IS NULL).
+                if num is None:
+                    cands.append((SPEC_BEZ_BROJA, c))
+            elif num is None:
+                continue  # interval / single need a house number
             elif k == "interval":
                 if c["lo"] <= num <= c["hi"] and _parity_ok(num, c["parity"]) and _bounds_ok(num, suf, c):
                     cands.append((SPEC_INTERVAL, c))
@@ -513,6 +522,10 @@ def main() -> int:
                     claims_by_street.setdefault(tid, []).append({
                         "seg_id": s["id"], "station_id": s["station_id"], "kind": "single",
                         "num": num, "suffix": sfx})
+            # "бб" is additive: claims the street's no-number houses alongside any ranges.
+            if parsed.get("bez_broja"):
+                claims_by_street.setdefault(tid, []).append(
+                    {"seg_id": s["id"], "station_id": s["station_id"], "kind": "bez_broja"})
 
     # Settlement names (for added-claim labels and human-readable reasons below).
     _setts = pl.read_parquet(config.SETTLEMENTS_PARQUET)
@@ -546,7 +559,8 @@ def main() -> int:
                 continue
             seg_id = config.ADDED_SEG_BASE + int(a["id"])
             parsed = {"intervals": mp.get("intervals", []), "singles": mp.get("singles", []),
-                      "whole": bool(mp.get("whole")), "unknown_tokens": []}
+                      "whole": bool(mp.get("whole")), "bez_broja": bool(mp.get("bez_broja")),
+                      "unknown_tokens": []}
             # Settlement claims yield to any street-level claim, like document ones.
             whole_kind = "sett_whole" if sett_id else "whole"
             for tid in targets:
@@ -563,6 +577,9 @@ def main() -> int:
                         claims_by_street.setdefault(tid, []).append({
                             "seg_id": seg_id, "station_id": a["station_id"], "kind": "single",
                             "num": num, "suffix": sfx})
+                if parsed["bez_broja"]:
+                    claims_by_street.setdefault(tid, []).append(
+                        {"seg_id": seg_id, "station_id": a["station_id"], "kind": "bez_broja"})
             sname = sett_names.get(sett_id, sett_id) if sett_id else None
             added_out.append({
                 "id": seg_id, "station_id": a["station_id"], "settlement_raw": None,

@@ -328,6 +328,16 @@
     wholeLbl.appendChild(document.createTextNode(" " + L_.wholeStreet));
     body.appendChild(wholeLbl);
 
+    // bez-broja ("бб") toggle: also cover the street's no-number houses
+    const bezLbl = document.createElement("label");
+    bezLbl.className = "whole";
+    const bezBroja = document.createElement("input");
+    bezBroja.type = "checkbox";
+    bezBroja.checked = !!seg.parsed.bez_broja;
+    bezLbl.appendChild(bezBroja);
+    bezLbl.appendChild(document.createTextNode(" " + L_.bezBroja));
+    body.appendChild(bezLbl);
+
     // intervals
     const ivWrap = document.createElement("div");
     ivWrap.className = "field";
@@ -360,7 +370,7 @@
     const actions = document.createElement("div");
     actions.className = "seg-actions";
     const payload = (reviewedFlag) => JSON.stringify({
-      ...collect(whole, ivList, sgList, reviewedFlag),
+      ...collect(whole, bezBroja, ivList, sgList, reviewedFlag),
       street_id: chosenStreet ?? seg.manual_street_id ?? null, // keep prior manual street
     });
     const save = mkBtn(L_.save, "btn primary", async () => {
@@ -384,7 +394,7 @@
       actions.appendChild(mkBtn(L_.doesNotExist, "btn", async () => {
         await fetch(`/api/segments/${seg.id}`, {
           method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...collect(whole, ivList, sgList, true), street_id: "none" }),
+          body: JSON.stringify({ ...collect(whole, bezBroja, ivList, sgList, true), street_id: "none" }),
         });
         await reload();
       }));
@@ -442,7 +452,7 @@
     row.append(n, suf, rowRemoveBtn(() => row.remove()));
     return row;
   }
-  function collect(whole, ivList, sgList, reviewed) {
+  function collect(whole, bezBroja, ivList, sgList, reviewed) {
     const intervals = [...ivList.querySelectorAll(".row.iv")].map((r) => {
       const [lo, loSfx] = parseBound(r.querySelector(".lo").value);
       const [hi, hiSfx] = parseBound(r.querySelector(".hi").value);
@@ -452,7 +462,7 @@
     const singles = [...sgList.querySelectorAll(".row.sg")].map((r) =>
       [Number(r.querySelector(".n").value), r.querySelector(".suffix").value.trim().toUpperCase()]
     ).filter((x) => x[0] || x[1]);
-    return { whole: whole.checked, intervals, singles, reviewed };
+    return { whole: whole.checked, bez_broja: bezBroja.checked, intervals, singles, reviewed };
   }
 
   function mkBtn(text, cls, onClick) {

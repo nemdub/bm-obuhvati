@@ -209,7 +209,7 @@ export function stationDetailView(c: Context, st: StationRow, muniName: string) 
 function labelBundle(script: Script) {
   const t = makeT(script);
   return {
-    street: t("street"), wholeStreet: t("wholeStreet"), ranges: t("ranges"),
+    street: t("street"), wholeStreet: t("wholeStreet"), bezBroja: t("bezBroja"), ranges: t("ranges"),
     singles: t("singles"), suffix: t("suffix"), save: t("save"), revert: t("revert"),
     markReviewed: t("markReviewed"), needsReview: t("needsReview"), reviewed: t("reviewed"),
     confidence: t("confidence"), amendmentNote: t("amendmentNote"), streetUnresolved: t("streetUnresolved"),
