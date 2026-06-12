@@ -220,7 +220,10 @@ def main() -> int:
     munis = pl.read_parquet(config.MUNICIPALITIES_PARQUET)
     match_muni = build_muni_matcher(munis)
 
-    files = sorted(p for p in config.DOCS_DIR.iterdir() if p.suffix.lower() in (".doc", ".docx"))
+    files = sorted(
+        p for p in config.DOCS_DIR.iterdir()
+        if p.suffix.lower() in (".doc", ".docx") and not p.name.startswith("~$")  # skip Word lock files
+    )
     if args.files:
         wanted = {f.strip() for f in args.files.split(",")}
         files = [p for p in files if p.name in wanted]
@@ -265,8 +268,16 @@ def main() -> int:
             rows = rows_from_docx(textutil(path, "html"))
         else:
             rows = rows_from_doc(txt, section_map or None)
-            if not rows:  # number-less table -> triplet fallback
-                rows = rows_from_doc_triplets(txt)
+            if not rows:
+                # No number column in the linearized text. Some .doc files still carry a
+                # real Word table; textutil renders it to HTML with proper cells, so parse
+                # that the same way as a .docx. It keeps the printed numbers and is immune
+                # to the multi-line-header / wrapped-coverage drift that makes the rigid
+                # 3-line triplet grouping mis-count (e.g. Novi Sad: 215 vs the declared
+                # 207). Sectioned docs stay on the txt path so section assignment holds;
+                # the triplet fallback only runs when there is no usable table at all.
+                html_rows = rows_from_docx(textutil(path, "html")) if not section_map else []
+                rows = html_rows or rows_from_doc_triplets(txt)
 
         declared = None
         m = COUNT_RE.search(txt)
