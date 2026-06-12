@@ -8,8 +8,8 @@ macOS `textutil` to convert `.doc` → txt (linearized) and `.docx`/table `.doc`
 (cells preserved).
 
 > Test target: `rows_from_docx`, `rows_from_doc`, `rows_from_doc_triplets`,
-> `clean_filename_to_candidate`, `deaccent`, `build_muni_matcher`, `_header_start`, the
-> file classification regexes, and the station‑id formula.
+> `_dedupe_dual_script`, `clean_filename_to_candidate`, `deaccent`, `build_muni_matcher`,
+> `_header_start`, the file classification regexes, and the station‑id formula.
 
 ## 3.1 File classification
 
@@ -67,6 +67,42 @@ TABLE_END_RE = ^(II|III|IV|V|VI)\.?$  |  ^Ово решењ  |  доставит
 **Gated on `cur is not None`** — it only fires once inside the table (a station has started),
 because the same phrases also appear in the pre‑table preamble. This trimmed ~21 bogus
 boilerplate "stations".
+
+### Dual‑script rows (`_dedupe_dual_script`)
+
+The Sandžak‑region docs (`Tutin`, `Prijepolje`, `Sjenica`) print **every table cell twice** —
+once in Cyrillic, then the same content in Latin. Linearized, a station's lines interleave:
+
+```
+ЛОКАЛ ХАМЗАГИЋ РЕШАДА            name (cyr)
+LOKAL HAMZAGIĆ REŠADA           name (lat)
+ТУТИН, БОГОЉУБА ЧУКИЋА ББ        address (cyr)
+TUTIN, BOGOLjUBA ČUKIĆA BB      address (lat)
+9. црногорске бригаде бб, …      coverage (cyr)
+9. crnogorske brigade bb, …      coverage (lat)
+```
+
+Without handling, `flush()` reads the Latin **name** as the address and sweeps both
+addresses + both coverages into `raw_coverage_text` (so polling station #1 "covered" its own
+header `ТУТИН, БОГОЉУБА ЧУКИЋА ББ …` plus the entire Latin list).
+
+**Rule:** before splitting `cur` into name/address/coverage, drop every line that is the
+**Latin transliteration of the line before it** (`_is_lat_restatement`: `fuzz.ratio` of
+`cyr_to_lat(prev)` vs the line `≥ 85`, allowing minor ијекавица/typo drift), keeping only the
+Cyrillic side. Done **pairwise**, not by even/odd index, so a row that doubles only *some*
+cells still aligns — e.g. a Sjenica station whose name isn't restated (5 lines):
+
+```
+Приватна кућа Неџада Муратовића   name (no Latin twin)
+Врсјенице / Vrsjenice             address cyr / lat   → keeps Врсјенице
+Баре, Врсјенице / Bare, Vrsjenice coverage cyr / lat  → keeps Баре, Врсјенице
+```
+
+**Single‑script docs are untouched**: there the line after the name is the Cyrillic
+*address*, which is in a different script from `cyr_to_lat(name)` and never reaches the 85
+threshold — so nothing collapses. Verified: dual‑script handling brought Tutin/Prijepolje/
+Sjenica to their declared counts (61/66/68) with correct address & coverage columns, and no
+single‑script doc changed.
 
 ## 3.5 Sectioned city docs (`rows_from_doc` with `sections`)
 

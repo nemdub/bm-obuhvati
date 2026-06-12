@@ -49,7 +49,7 @@ echo "-- stage06: build derived dump + R2 polygon blobs"
 "$PY" "$DIR/stage06_build_sqlite.py" >/dev/null
 
 if [ "$IMPORT" = 1 ]; then
-  echo "-- uploading polygon blobs to R2"
+  echo "-- uploading changed polygon blobs to R2"
   "$DIR/sync_r2.sh"
 
   IMPORT_OK=1

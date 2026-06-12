@@ -113,6 +113,35 @@ def _header_start(lines: list[str]) -> int:
     return 0
 
 
+def _is_lat_restatement(cyr: str, lat: str) -> bool:
+    """True when `lat` is the Latin transliteration of the Cyrillic `cyr` (allowing
+    for minor ијекавица/typo drift). Used to spot dual‑script cell restatements."""
+    return fuzz.ratio(collapse(cyr_to_lat(cyr)).casefold(), collapse(lat).casefold()) >= 85
+
+
+def _dedupe_dual_script(cur: list[str]) -> list[str]:
+    """Some municipalities (Tutin, Prijepolje, Sjenica) print every table cell twice —
+    once in Cyrillic, then the same content in Latin — so a station's collected lines
+    arrive interleaved: [name_cyr, name_lat, address_cyr, address_lat,
+    coverage_cyr, coverage_lat]. Left untouched, the Latin restatements get swept into
+    the coverage text (and the Latin *name* gets read as the address).
+
+    Drop every line that is the Latin transliteration of the line before it, keeping
+    only the Cyrillic side. Done pairwise (not by even/odd index) so a row that doubles
+    only *some* cells — e.g. a Sjenica station whose name isn't restated — still aligns.
+    Single‑script docs are untouched: no Cyrillic line is followed by its own Latin
+    transliteration there (the line after the name is the Cyrillic address)."""
+    out: list[str] = []
+    i = 0
+    while i < len(cur):
+        out.append(cur[i])
+        if i + 1 < len(cur) and _is_lat_restatement(cur[i], cur[i + 1]):
+            i += 2  # skip the Latin restatement of this line
+        else:
+            i += 1
+    return out
+
+
 SECTION_RE = re.compile(r"ГРАДСКА\s+ОПШТИНА\s+(.+)", re.IGNORECASE)
 
 
@@ -145,9 +174,10 @@ def rows_from_doc(txt: str, sections: dict[str, str] | None = None
     def flush() -> None:
         if cur is None:
             return
-        name = cur[0] if len(cur) >= 1 else ""
-        address = cur[1] if len(cur) >= 2 else ""
-        coverage = " ".join(cur[2:]).strip()
+        lines = _dedupe_dual_script(cur)
+        name = lines[0] if len(lines) >= 1 else ""
+        address = lines[1] if len(lines) >= 2 else ""
+        coverage = " ".join(lines[2:]).strip()
         out.append((cur_section, cur_num, name, address, coverage))
 
     for ln in lines[start:]:

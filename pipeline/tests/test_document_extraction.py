@@ -90,6 +90,47 @@ class TestRowsFromDoc:
         rows = S2.rows_from_doc(txt)
         assert len(rows) == 1 and rows[0][1] == 1
 
+    def test_dual_script_rows_keep_only_cyrillic(self):
+        # Tutin/Prijepolje/Sjenica print every cell twice (Cyrillic then Latin). The
+        # Latin restatements must NOT leak into the address (it would steal the Latin
+        # name) or the coverage (it would prepend the station's own address + Latin list).
+        txt = "\n".join([
+            HEADER,
+            "1",
+            "ЛОКАЛ ХАМЗАГИЋ РЕШАДА", "LOKAL HAMZAGIĆ REŠADA",        # name cyr / lat
+            "ТУТИН, БОГОЉУБА ЧУКИЋА ББ", "TUTIN, BOGOLjUBA ČUKIĆA BB",  # address cyr / lat
+            "Богољуба Чукића бб, Градац", "Bogoljuba Čukića bb, Gradac",  # coverage cyr / lat
+        ])
+        rows = S2.rows_from_doc(txt)
+        assert rows == [(
+            None, 1,
+            "ЛОКАЛ ХАМЗАГИЋ РЕШАДА",
+            "ТУТИН, БОГОЉУБА ЧУКИЋА ББ",
+            "Богољуба Чукића бб, Градац",
+        )]
+
+    def test_dual_script_row_with_undoubled_name(self):
+        # A Sjenica station whose NAME isn't restated (5 lines, not 6). Pairwise collapse
+        # still aligns address/coverage to their Cyrillic side.
+        txt = "\n".join([
+            HEADER,
+            "1",
+            "Приватна кућа Неџада Муратовића",   # name (no Latin twin)
+            "Врсјенице", "Vrsjenice",            # address cyr / lat
+            "Баре, Врсјенице", "Bare, Vrsjenice",  # coverage cyr / lat
+        ])
+        rows = S2.rows_from_doc(txt)
+        assert rows == [(
+            None, 1, "Приватна кућа Неџада Муратовића", "Врсјенице", "Баре, Врсјенице",
+        )]
+
+    def test_single_script_row_untouched_by_dedupe(self):
+        # A normal Cyrillic-only row must pass through unchanged: the line after the name
+        # is the Cyrillic address, never the Latin transliteration of the name.
+        txt = "\n".join([HEADER, "1", "ОШ Вук", "Ул. Прва 1", "Прва 1-10", "Друга 2-8"])
+        rows = S2.rows_from_doc(txt)
+        assert rows == [(None, 1, "ОШ Вук", "Ул. Прва 1", "Прва 1-10 Друга 2-8")]
+
 
 class TestRowsFromDocTriplets:
     def test_groups_into_triplets(self):
