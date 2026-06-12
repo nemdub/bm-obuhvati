@@ -232,4 +232,3 @@ register Latin house‑suffixes to Cyrillic.
 | `Љубоморна` | `Ljubomorna` |
 | `Џ` | `Dž` |
 | `190B` (suffix `B`) | → `lat_to_cyr` → `в`, then uppercased to `В` by `normalize_suffix` |
-</content>

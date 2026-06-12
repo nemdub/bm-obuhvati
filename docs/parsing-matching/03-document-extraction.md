@@ -129,4 +129,3 @@ Maps a doc filename to a register municipality:
    sectioned doc).
 
 Base matches scoring `< 92` are reported as low‑confidence → review the CSV map.
-</content>

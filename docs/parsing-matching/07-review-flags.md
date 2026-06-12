@@ -81,4 +81,3 @@ register „Виноградарска".
 - **`no_match`** is added to any non‑`whole` segment that produced no links (and isn't an
   old‑name‑dup). A whole‑street claim that legitimately covers everything is never
   `no_match`.
-</content>

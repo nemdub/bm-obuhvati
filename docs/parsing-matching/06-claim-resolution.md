@@ -148,4 +148,3 @@ munis are re‑matched, then merged into the complete parquets (drop affected st
 rows, append fresh). Conflict resolution stays identical because **every claimant of a given
 street shares a municipality**. Segment ids are preserved so reviewer overrides stay
 attached.
-</content>

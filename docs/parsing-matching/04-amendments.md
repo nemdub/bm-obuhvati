@@ -71,4 +71,3 @@ base table.
 Only Subotica‑style phrasing parses today. ~45 amendment docs use different wording and
 currently yield `other` ops (the base coverage is still loaded; only the surgical edit is
 skipped). New phrasings are a natural place to add regexes + tests.
-</content>

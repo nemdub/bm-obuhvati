@@ -210,4 +210,3 @@ After machine resolution, stage04 applies reviewer overrides from `overrides.jso
 - `manual_json` present → replaces the machine parse for claim building.
 
 These mirror the Worker's override resolution (see [08](08-worker-live-preview.md)).
-</content>

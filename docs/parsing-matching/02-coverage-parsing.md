@@ -62,8 +62,9 @@ Classifies one number‑side token into the segment. After stripping `.,;` white
 3. **Single** (`_SINGLE`) → append `[num, normalize_suffix(rest)]`.
 4. **Otherwise** → append raw token to `unknown_tokens` (→ review).
 
-`_add_numbers` skips standalone `и`; once any interval/single is present it forces
-`whole = False`.
+`_add_numbers` is a small grammar over the number side, not a plain token loop. It drops
+filler/label words, recognizes `од … до …` ranges, and applies side‑of‑street parity — see
+2.12. Once any interval/single is present it forces `whole = False`.
 
 ### Token predicates
 
@@ -73,8 +74,13 @@ Classifies one number‑side token into the segment. After stripping `.,;` white
   then a digit (`А-21`, `Т-8`, `Е1-Е-7/I`). See 2.5.
 - **`is_bb_token(w)`**: `бб`/`ББ`/`бб.`/`б.б.`/Latin `bb`, dot‑ and case‑tolerant (dots are
   stripped before matching).
+- **`is_broj_token(w)`**: the house‑number label `бр`/`бр.`/`број`/`броја`/`бројеви`/Latin
+  `broj…` (`_BROJ_RE`, dot‑ and case‑tolerant). Neither name nor number — see 2.13.
+- **`is_od_token(w)`**: the range‑start preposition `од` ("from"). Ends a street name, dropped
+  from the number side — see 2.12.
 - **`is_number_side(w)`** = house OR block OR bb. This is the boundary between the street
-  name and the number side of a clause.
+  name and the number side of a clause. (`бр.`/`од` are handled separately as name‑enders, not
+  via `is_number_side`.)
 
 ---
 
@@ -229,8 +235,9 @@ compound names kept whole; each was 2 phantom review items → 1 correct match.
 `parse_structured` is unaffected (the street name precedes `бројеви`).
 
 > **Pipeline note:** stage03 builds the per‑muni `is_street` set from register `name_norm`s
-> containing the token `И`. After a parser change, re‑run stage03 + stage03b before
-> `recompute.sh` (which starts at stage04).
+> that **either contain the token `И`** (this rule) **or contain a digit** (the numbered‑name
+> rule, 2.14). The same predicate serves both. After a parser change, re‑run stage03 +
+> stage03b before `recompute.sh` (which starts at stage04).
 
 ---
 
@@ -274,4 +281,123 @@ For the `Насеље:`/`Улица:`/`бројеви` form (e.g. Ada). Rules:
 
 `Насеље: Ада Улица: 8. Март бројеви 1, 2, 3` → settlement `Ада`, street `8. Март`,
 singles `[1],[2],[3]`.
-</content>
+
+---
+
+## 2.12 Number‑side grammar: `од … до …`, `до краја`, side parity, fillers (`_add_numbers`)
+
+The compact number side is not just a list of tokens — it is a small grammar (`_add_numbers`)
+over fillers, the Serbian `од … до …` range form, and side‑of‑street phrasing.
+
+### Dropped filler / label words
+
+These are skipped (consumed, no effect on the parse):
+
+- `и` (list connector), `од` (range‑start "from"),
+- `бр.`/`број`/`броја`/`бројеви` (`is_broj_token`, the number label),
+- `па` ("and onwards"), `на` and `страна`/`страни`/`стране`/`страну` (side‑of‑street phrasing).
+
+### `од N до M` / `од N до краја` ranges
+
+**Rule:** a house number followed by `до` ("to") forms a range. `до` is treated as a
+connector **only between numbers** here — in a street name it stays put (the toponym is `До`,
+e.g. `Добри До`, `Милошев До`). `бр.`/`па` between the bound and `до` (and after it) are
+skipped.
+
+- `од N до M` → `[N, M, interval_parity(N, M)]`.
+- `од N до краја` ("to the end of the street") → open‑ended upper bound
+  `[N, OPEN_END, parity]` where **`OPEN_END = 100000`** (a sentinel above any real house
+  number; register max ≈ 2159) and parity follows N's own parity.
+- `од броја N до M` works (the `броја` label is skipped).
+
+### Side‑of‑street parity (`_side_parity`)
+
+**Rule:** `парн…` (e.g. `парној`) → `even`, `непарн…` → `odd`. A side word **overrides the
+parity of the last interval** it qualifies. `2-100 на парној страни` → `[2, 100, 'even']`;
+`1-99 непарна страна` → `[1, 99, 'odd']`.
+
+### Examples
+
+| Input | intervals |
+|-------|-----------|
+| `Стевана Чоловића од 1-17` | `[[1, 17, 'odd']]` (street `Стевана Чоловића`) |
+| `Прва од 33 до 117` | `[[33, 117, 'odd']]` |
+| `Прва од броја 33 до 117` | `[[33, 117, 'odd']]` |
+| `Прва од 5 до краја` | `[[5, 100000, 'odd']]` |
+| `Прва 2-100 на парној страни` | `[[2, 100, 'even']]` |
+
+> **Downstream:** an `OPEN_END` interval is matched by the normal interval logic
+> (`_bounds_ok`/`houseInInterval`) — `100000` is simply a very large `hi`, no special case in
+> stage04. The Worker renders it as an empty upper‑bound field with a "до краја" placeholder
+> (see [08](08-worker-live-preview.md)).
+
+---
+
+## 2.13 The `бр.` / `број` house‑number label (`is_broj_token`)
+
+**Rule:** `бр`/`бр.`/`број`/`броја`/`бројеви` (and Latin `broj…`) is a *label* introducing
+house numbers — neither part of the street name nor a house number itself.
+
+- In `parse_compact`, it **ends the street name** (the name/number boundary breaks on it).
+- In `_add_numbers`, it is **dropped** from the number side.
+
+### Examples
+
+- `Нова 27 бр. 5-9` (no register match for `Нова 27`) → street `Нова`, single `27`,
+  interval `[5, 9, 'odd']`.
+- `Нова 27 бр. 5-9` (when `НОВА 27` **is** a register street, see 2.14) → street `Нова 27`,
+  interval `[5, 9, 'odd']`.
+
+---
+
+## 2.14 Numbered street names — `Нова 27`, `Улица N` (register‑driven)
+
+**Rule:** a trailing number that, together with the name so far, is **itself a register
+street** is kept as part of the **name**, not stripped as a house number. Register‑driven via
+the same `is_street` predicate as the compound‑`и` merge (2.8).
+
+Guards:
+- Requires a **name stem before the number** (`j > 0`) — so a bare number continuing the
+  previous street (`Стројковце 0 и 1`) is **never** promoted to a street, even if `1` happens
+  to be a register street name elsewhere in the muni.
+- The whole prefix `"<name so far> <number>"` must normalize to a known register street.
+
+### Examples
+
+| Input | register has… | Result |
+|-------|---------------|--------|
+| `Нова 4, Нова 6, Нова 21` | `НОВА 4`, `НОВА 6`, `НОВА 21` | three segments: `Нова 4`, `Нова 6`, `Нова 21` |
+| `Нова 4, Нова 6, Нова 21` | *(no predicate)* | one segment `Нова` (numbers 4/6/21 collapse) |
+| `Улица 27` | `УЛИЦА 27` | one segment, street `Улица 27` |
+| `Стројковце 0 и 1` | `1` is a street | one segment `Стројковце` (number not promoted) |
+
+### Rationale
+
+Niš and others have streets literally named `Улица N` / `Нова N`. Without this rule each
+`Нова N` parsed as house N of a single `Нова` street, collapsing `Нова 4, Нова 6, Нова 21, …`
+into one `Нова` street + houses 4/6/21. Fixed at parse time (register‑driven) for the same
+positional‑id reason as the `и` merge.
+
+> **Pipeline note:** stage03's `is_street` set now also includes register names containing a
+> **digit** (not only those with the token `И`) so this predicate is populated — see the
+> note under 2.8.
+
+---
+
+## 2.15 Text preprocessing in `parse_coverage`
+
+Before dialect detection, `parse_coverage` runs three regex fix‑ups on the raw text so the
+tokenizer sees clean tokens:
+
+| Regex | Fix | Example |
+|-------|-----|---------|
+| `_DEO_GLUE` | split `део` glued to a number | `део13` → `део 13` (see 2.7) |
+| `_DASH_SPACE` | collapse spaces around a range dash, **digits only** | `2- 100`, `2 - 100` → `2-100` |
+| `_ORDINAL_GLUE` | split an ordinal glued to the next word | `7.јула` → `7. јула` |
+
+- **`_DASH_SPACE`** only fires **between digits**, so block tags (`С-1`) and suffix tails are
+  untouched. `Прва 2 - 100` → interval `[2, 100, 'even']` (would otherwise tokenize as `2`,
+  `-`, `100`).
+- **`_ORDINAL_GLUE`** keeps a glued ordinal in the street name: `7.јула 1-10` → street
+  `7. јула`, interval `[1, 10, 'all']` (otherwise `7` would look like a house number).
+

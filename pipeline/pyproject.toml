@@ -13,5 +13,13 @@ dependencies = [
     "rapidfuzz>=3.9",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [tool.ruff]
 line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
