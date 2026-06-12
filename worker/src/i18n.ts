@@ -30,6 +30,7 @@ export const STRINGS = {
   parityAll: "сви",
   parityOdd: "непарни",
   parityEven: "парни",
+  toEnd: "до краја",
   singles: "Појединачни бројеви",
   confidence: "Поузданост",
   amendmentNote: "Измена решења",

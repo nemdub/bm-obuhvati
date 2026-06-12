@@ -90,6 +90,44 @@ def is_bb_token(w: str) -> bool:
     return bool(_BB_RE.match(w.strip(".,;").replace(".", "")))
 
 
+# "бр." / "број" / "броја" / "бројеви" — the label that introduces house numbers ("Нова 27
+# бр. 5-9", "од броја 33 до 117"). Neither part of the street name nor a house number itself:
+# it ends the name and is then dropped from the number side.
+_BROJ_RE = re.compile(r"^(?:бр|број[А-Яа-яЂ-џ]*|broj[a-z]*)$", re.IGNORECASE)
+
+
+def is_broj_token(w: str) -> bool:
+    return bool(_BROJ_RE.match(w.strip(".,;").replace(".", "")))
+
+
+# "од N до M", "од N до краја" — Serbian range grammar. "од" (from) starts a range and "до"
+# (to) connects the bounds; "до краја" means "to the end of the street" (open-ended upper
+# bound). NB: "до"/"До" is also a common toponym ("Добри До", "Милошев До"), so "до" is only
+# ever a connector BETWEEN numbers (handled in _add_numbers) — in a street name it stays put.
+# "до краја" upper bound: a sentinel above any real house number (register max is ~2159).
+OPEN_END = 100000
+_KRAJA = {"краја", "крај", "краj"}
+
+
+def _word(w: str) -> str:
+    return w.strip(".,;").lower()
+
+
+def is_od_token(w: str) -> bool:
+    """The range-start preposition 'од' (from) — ends a street name, dropped from numbers."""
+    return _word(w) == "од"
+
+
+def _side_parity(w: str) -> str | None:
+    """Side-of-street indicator: 'парна/парној страна' -> even, 'непарна/непарној' -> odd."""
+    wl = _word(w)
+    if wl.startswith("непарн"):
+        return "odd"
+    if wl.startswith("парн"):
+        return "even"
+    return None
+
+
 def is_house_token(w: str) -> bool:
     """A house-number token starts with a digit and is not an ordinal ('20.', '8.')."""
     if not w or not w[0].isdigit():
@@ -131,10 +169,43 @@ def parse_number_token(tok: str, seg: Segment) -> None:
 
 
 def _add_numbers(seg: Segment, words: list[str]) -> None:
-    for w in words:
-        if w == "и":
+    i, n = 0, len(words)
+    while i < n:
+        w = words[i]
+        wl = _word(w)
+        # Range-grammar fillers, dropped: list "и", "од" (from), "бр./број(а)" (label),
+        # "па" (and onwards), "на"/"страна/страни" (side-of-street phrasing).
+        if wl in ("и", "од", "па", "на", "страна", "страни", "стране", "страну") or is_broj_token(w):
+            i += 1
             continue
+        # Side indicator overrides the parity of the range it qualifies ("2-100 на парној").
+        side = _side_parity(w)
+        if side and seg.intervals:
+            seg.intervals[-1][2] = side
+            i += 1
+            continue
+        # "N до краја" / "N до M": a "до"-connected range (only here is "до" a connector, not
+        # the toponym "До"). Skip any "бр."/"па" between the bound and the connector.
+        if is_house_token(w):
+            k = i + 1
+            while k < n and (is_broj_token(words[k]) or _word(words[k]) == "па"):
+                k += 1
+            if k < n and _word(words[k]) == "до":
+                k += 1
+                while k < n and is_broj_token(words[k]):
+                    k += 1
+                lo = int(re.match(r"\d+", w).group())
+                if k < n and _word(words[k]) in _KRAJA:
+                    seg.intervals.append([lo, OPEN_END, "odd" if lo % 2 else "even"])
+                    i = k + 1
+                    continue
+                if k < n and is_house_token(words[k]):
+                    hi = int(re.match(r"\d+", words[k]).group())
+                    seg.intervals.append([lo, hi, interval_parity(lo, hi)])
+                    i = k + 1
+                    continue
         parse_number_token(w, seg)
+        i += 1
     if seg.intervals or seg.singles:
         seg.whole = False
 
@@ -234,6 +305,11 @@ def parse_compact(text: str, settlement: str = "", is_street=None) -> list[Segme
         for piece in _merge_street_connectors(_split_on_connector(rest), is_street):
             j = 0
             while j < len(piece):
+                # The "бр."/"број" label and the "од" (from) preposition both end the street
+                # name and introduce house numbers ("Нова 27 бр. 5-9", "Стевана Чоловића од
+                # 1-17"). "од" is unambiguous here (the toponym is "До", not "од").
+                if is_broj_token(piece[j]) or is_od_token(piece[j]):
+                    break
                 if not is_number_side(piece[j]):
                     j += 1
                     continue
@@ -247,6 +323,17 @@ def parse_compact(text: str, settlement: str = "", is_street=None) -> list[Segme
                 # (register street "БЛОК 112"), not a house number.
                 prev = piece[j - 1].strip(".,;").upper() if j > 0 else ""
                 if is_house_token(piece[j]) and prev in ("БЛОК", "БЛОКА"):
+                    j += 1
+                    continue
+                # "Нова 4", "Нова 21": a trailing number that, together with the name so
+                # far, is itself a register street is part of the NAME, not a house number.
+                # Without this each "Нова N" parses as house N of a single "Нова" street and
+                # they collapse into one segment. Register-driven, like the 'и' merge above.
+                # Requires a name stem before the number (j > 0) so a bare number continuing
+                # the previous street ("Стројковце 0 и 1") is never promoted to a street even
+                # when "1" happens to be a register street name elsewhere in the muni.
+                if (j > 0 and is_street is not None and is_house_token(piece[j])
+                        and is_street(normalize_street(" ".join(piece[: j + 1])))):
                     j += 1
                     continue
                 break
@@ -326,6 +413,13 @@ def parse_structured(text: str) -> list[Segment]:
 # "Nth part" street names ("Угриновачки пут 1 део"): documents sometimes glue the part
 # word to the following house number ("део13") — split so tokenization sees them apart.
 _DEO_GLUE = re.compile(r"(?i)\b(део)(\d)")
+# A space around the range dash ("2- 100", "2 - 100") splits the range into two tokens —
+# collapse it so the bound stays one token ("2-100"). Only between digits, so block tags
+# ("С-1") and suffix tails are untouched.
+_DASH_SPACE = re.compile(r"(\d)\s*[-–]\s*(\d)")
+# Ordinal glued to the following word ("7.јула", "1.маја", "10.октобра") — split so "7." is
+# seen as an ordinal (street-name part) instead of a house number "7" + junk.
+_ORDINAL_GLUE = re.compile(r"(\d+\.)([А-Яа-яЂ-џA-Za-z])")
 
 
 def parse_coverage(text: str, is_street=None) -> list[Segment]:
@@ -337,5 +431,7 @@ def parse_coverage(text: str, is_street=None) -> list[Segment]:
     if not text or not text.strip():
         return []
     text = _DEO_GLUE.sub(r"\1 \2", text)
+    text = _DASH_SPACE.sub(r"\1-\2", text)
+    text = _ORDINAL_GLUE.sub(r"\1 \2", text)
     is_structured = bool(_ULICA.search(text) and _BROJEVI.search(text))
     return parse_structured(text) if is_structured else parse_compact(text, is_street=is_street)

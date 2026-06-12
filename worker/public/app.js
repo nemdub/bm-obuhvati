@@ -2,6 +2,7 @@
 (() => {
   const cfg = JSON.parse(document.getElementById("cfg").textContent);
   const L_ = window.__L; // pre-transliterated labels
+  const OPEN_END = 100000; // "до краја" upper-bound sentinel (mirrors coverage_parse.OPEN_END)
   const api = (p) => `/api/s/${cfg.stationId}${p}`;
 
   const map = L.map("map");
@@ -432,7 +433,11 @@
     const row = document.createElement("div");
     row.className = "row iv";
     const lo = boundInput(iv[0], iv.length > 3 ? iv[3] : "", "lo");
-    const hi = boundInput(iv[1], iv.length > 4 ? iv[4] : "", "hi");
+    // An open-ended upper bound ("до краја" / to the end) is stored as the OPEN_END
+    // sentinel; show it as an empty field with a "до краја" placeholder, not a magic number.
+    const hiOpen = iv[1] >= OPEN_END;
+    const hi = boundInput(hiOpen ? "" : iv[1], iv.length > 4 ? iv[4] : "", "hi");
+    if (hiOpen) hi.placeholder = L_.toEnd;
     const par = document.createElement("select");
     par.className = "parity";
     [["all", L_.parityAll], ["odd", L_.parityOdd], ["even", L_.parityEven]].forEach(([v, label]) => {
@@ -455,7 +460,10 @@
   function collect(whole, bezBroja, ivList, sgList, reviewed) {
     const intervals = [...ivList.querySelectorAll(".row.iv")].map((r) => {
       const [lo, loSfx] = parseBound(r.querySelector(".lo").value);
-      const [hi, hiSfx] = parseBound(r.querySelector(".hi").value);
+      const hiRaw = r.querySelector(".hi").value.trim();
+      let [hi, hiSfx] = parseBound(hiRaw);
+      // An empty upper bound on a row with a lower bound means "до краја" (open-ended).
+      if (hiRaw === "" && lo) { hi = OPEN_END; hiSfx = ""; }
       const parity = r.querySelector(".parity").value;
       return loSfx || hiSfx ? [lo, hi, parity, loSfx, hiSfx] : [lo, hi, parity];
     }).filter((x) => x[0] || x[1]);

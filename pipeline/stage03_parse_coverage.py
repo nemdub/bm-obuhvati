@@ -33,15 +33,20 @@ def main() -> int:
     if args.municipality:
         stations = stations.filter(pl.col("municipality_id") == args.municipality)
 
-    # Register street names (per municipality group rep) that contain a literal "и", so the
-    # compact parser keeps compound names like "Зрињског и Франкопана" whole instead of
-    # splitting them on the connector into two phantom streets.
+    # Register street names (per municipality group rep) the compact parser consults to
+    # disambiguate ambiguous comma/space splits. Two cases need register membership:
+    #   - names containing a literal "и" — keep compound names like "Зрињског и Франкопана"
+    #     whole instead of splitting on the connector into two phantom streets;
+    #   - names carrying a number ("НОВА 4", "НОВА 21") — keep a trailing number that is
+    #     really part of the street name instead of stripping it as a house number (which
+    #     collapsed "Нова 4, Нова 6, Нова 21, ..." into one "Нова" street + houses 4/6/21).
     streets = pl.read_parquet(config.STREETS_PARQUET)
     settlements = pl.read_parquet(config.SETTLEMENTS_PARQUET)
     sett_to_muni = dict(zip(settlements["id"], settlements["municipality_id"]))
     muni_and_streets: dict[str, set[str]] = {}
     for set_id, norm in zip(streets["settlement_id"], streets["name_norm"]):
-        if "И" not in norm.split():
+        toks = norm.split()
+        if "И" not in toks and not any(t.isdigit() for t in toks):
             continue
         muni = sett_to_muni.get(set_id)
         gmuni = config.group_rep(muni) if muni else muni
