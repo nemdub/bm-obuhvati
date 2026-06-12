@@ -8,7 +8,10 @@ tuple, so we build a small synthetic index by hand instead of loading the regist
          settlements_by_muni, station_muni, station_settlement, sett_to_streets)
 
 `resolve_street` uses idx[1] (by_muni_norm), idx[2] (by_sett_norm), idx[4]
-(settlements_by_muni) and idx[7] (sett_to_streets); the rest can be empty placeholders.
+(settlements_by_muni) and idx[7] (sett_to_streets) by index, so an 8-tuple still works even
+though `build_indexes` now returns a 9th slot (`station_settlement_inferred`, consumed by the
+caller, not `resolve_street`). Whether the scope is an inferred town is passed to
+`resolve_street` as the explicit `settlement_inferred` argument (§5.6).
 
 NOTE: register-side alternate keys (declension / sortkey / strip-ulica) are added in
 `build_indexes`, NOT here — so these tests exercise the DOC-side variant generation that
@@ -119,6 +122,52 @@ class TestMuniScope:
         sid, method, _, amb = S4.resolve_street("Дунавска", MUNI, "S1", idx)
         assert (sid, method) == (None, "ambiguous")
         assert sorted(amb) == ["st2", "st3"]
+
+
+class TestMuniFuzzy:
+    """Strict muni-wide fuzzy (`_fuzzy_muni_unique`), §5.6 — for stations with no home
+    settlement, where the settlement-scoped fuzzy (step 8) never runs."""
+
+    def test_no_settlement_muni_fuzzy_unique(self):
+        # No home settlement: a one-letter doc typo unique in the muni resolves via the strict
+        # muni-wide fuzzy. "Михаила" -> "Михајла" Пупина (WRatio 95.5 >= 93).
+        idx = make_index({"S1": {"st1": "Булевар Михајла Пупина"}}, {"S1": "Град"})
+        assert S4.resolve_street("Булевар Михаила Пупина", MUNI, None, idx)[:2] == ("st1", "fuzzy")
+
+    def test_muni_fuzzy_non_unique_target_rejected(self):
+        # The fuzzy target name exists in TWO settlements (maps to 2 streets) -> not unique,
+        # so the uniqueness guard rejects it (picking one would be a coin flip).
+        idx = make_index(
+            {"S1": {"st1": "Булевар Михајла Пупина"}, "S2": {"st2": "Булевар Михајла Пупина"}},
+            {"S1": "Град", "S2": "Село"},
+        )
+        assert S4.resolve_street("Булевар Михаила Пупина", MUNI, None, idx)[:2] == (None, "none")
+
+
+class TestInferredTownScope:
+    """Home-settlement town inference (§5.1): a no-settlement town station gets the eponymous
+    town settlement as scope, but — like a no-settlement station — still gets the muni-wide
+    fuzzy last resort for a street the register files under a neighbouring settlement."""
+
+    def test_inferred_town_allows_muni_fuzzy(self):
+        # Town scope was INFERRED: a typo'd street absent from the town but uniquely
+        # fuzzy-matchable elsewhere in the muni still resolves ("Кикиндски"->"Кикински", 96).
+        idx = make_index(
+            {"TOWN": {"st1": "Прва"}, "S2": {"st2": "Кикински пут"}},
+            {"TOWN": "Град", "S2": "Село"},
+        )
+        assert S4.resolve_street(
+            "Кикиндски пут", MUNI, "TOWN", idx, settlement_inferred=True)[:2] == ("st2", "fuzzy")
+
+    def test_address_resolved_settlement_does_not_muni_fuzzy(self):
+        # Same setup but the settlement came from the address (not inferred): the muni-wide
+        # fuzzy last resort does NOT run, so the typo stays unresolved.
+        idx = make_index(
+            {"S1": {"st1": "Прва"}, "S2": {"st2": "Кикински пут"}},
+            {"S1": "Прво Село", "S2": "Село"},
+        )
+        assert S4.resolve_street(
+            "Кикиндски пут", MUNI, "S1", idx, settlement_inferred=False)[:2] == (None, "none")
 
 
 class TestSettlementClaim:

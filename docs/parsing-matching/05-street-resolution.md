@@ -17,10 +17,37 @@ Matching is **settlement‑first**. The scope hierarchy:
 1. The segment's own `settlement_raw` if labelled (structured dialect), else
 2. the station's **home settlement**, parsed from its address's first comma token
    (`resolve_settlement_from_address`: `"КЕЛЕБИЈА, ПУТ …"` → `КЕЛЕБИЈА`), else
-3. the **municipality** (group rep) as fallback inside `resolve_street`.
+3. the **inferred town settlement** (see 5.1.1) when the address has no settlement prefix, else
+4. the **municipality** (group rep) as fallback inside `resolve_street`.
 
 Everything is keyed by `config.group_rep(muni)` so one city document resolves streets across
 all its city‑municipalities.
+
+### 5.1.1 Eponymous‑town home‑settlement inference (`build_indexes`)
+
+**Rule:** a station whose address has **no settlement prefix** (e.g. `ВУКА КАРАЏИЋА БР. 3` —
+a town address) has its home settlement **inferred** as the **eponymous town settlement**: the
+settlement whose name matches the municipality's. `build_indexes` computes one per muni by
+running `resolve_settlement(muni_name, …)` — so Ваљево muni → `ВАЉЕВО` town (exact), and
+Нови Београд → `БЕОГРАД (НОВИ БЕОГРАД)` (via the word‑containment fallback, 5.1 step 3 of
+`resolve_settlement`).
+
+These stations are tracked in `station_settlement_inferred`; the `settlement_inferred` flag is
+threaded into `resolve_street` and re‑enables the muni‑wide fuzzy last resort (5.6).
+
+#### Why
+
+Town stations list streets without a settlement prefix, so their home settlement can't come
+from the address — matching fell back to municipality‑wide. A common street name then went
+`ambiguous`: `Владике Николаја` is a real street in 11 Valjevo settlements, so without knowing
+the station sits in **Ваљево** town the matcher couldn't pick (Valjevo #16 had 7 such segments
+stuck). Verified safe: a no‑settlement station **is** a town station (rural stations name their
+village as the address, which resolves normally), so address‑resolved (rural) stations are
+untouched — the inference only adds a fallback when address resolution returns `None`.
+
+> Nationwide this resolved ~1,180 previously‑unresolved town streets (+21k links); 665 segments
+> left the review queue outright. Newly‑resolved streets that several town stations share
+> surface as honest `conflict` review items (previously hidden because nothing resolved).
 
 ### `resolve_settlement(raw, muni, settlements_by_muni)`
 
@@ -61,7 +88,7 @@ Tried in order; first hit wins. `primary` = normalized name with any parenthetic
 | 8 | `_fuzzy(primary)` | `fuzzy` (flagged) | **settlement only** |
 | 9 | `_token_subset(primary)` | `fuzzy` (flagged) | settlement |
 | 10 | muni exact (`primary`, then `alt`) | `muni_fallback` / `ambiguous` / `exact` | muni |
-| 11 | `_fuzzy_muni_unique` | `fuzzy` (flagged) | **muni, only if no home settlement** |
+| 11 | `_fuzzy_muni_unique` | `fuzzy` (flagged) | **muni, only if no home settlement OR an inferred town** |
 | 12 | settlement‑name (village) claim | `settlement` (flagged) | muni, **last resort** |
 | — | nothing | `none` | — |
 
@@ -106,21 +133,29 @@ conflicts −80).
 
 ## 5.6 Muni‑wide fuzzy exception (`_fuzzy_muni_unique`)
 
-**Rule:** for stations with **no resolvable home settlement** (Belgrade/Niš city‑munis whose
-addresses carry no settlement head), a *much stricter* muni‑wide fuzzy runs:
+**Rule:** for stations with **no resolvable home settlement** *or an **inferred** town scope*
+(`settlement_inferred`, see 5.1.1), a *much stricter* muni‑wide fuzzy runs:
 
 - cutoff `STREET_FUZZY_MUNI_MIN = 93` (vs 90),
 - same digit guard,
 - fires **only** when exactly **one** register name clears the cutoff **and** that name maps
   to exactly **one** street (uniqueness guard).
 
+Gated on `if not settlement_id or settlement_inferred`.
+
 ### Rationale
 
-These stations never run the settlement‑scoped fuzzy (step 8), so a one‑letter doc typo like
-`Михаила` → `Михајла` Пупина would otherwise fall through to `no_match`. The uniqueness
-requirement keeps it from reintroducing invented matches: a typo'd nonexistent street would,
-at most, near‑miss one real name and stays unresolved. Flagged `fuzzy` for reviewer
-confirmation.
+A no‑settlement station never runs the settlement‑scoped fuzzy (step 8), so a one‑letter doc
+typo like `Михаила` → `Михајла` Пупина would otherwise fall through to `no_match`. An
+**inferred‑town** station *does* have a (town) scope, but the town doc may reference a
+peri‑urban street the register files under a neighbouring settlement — so it keeps the same
+last resort (this also recovers the 32 cross‑settlement fuzzy matches the town inference would
+otherwise have dropped). The uniqueness requirement keeps it from reintroducing invented
+matches: a typo'd nonexistent street would, at most, near‑miss one real name and stays
+unresolved. Flagged `fuzzy` for reviewer confirmation.
+
+> An **address‑resolved** (rural) station keeps muni‑wide fuzzy **off** — `settlement_inferred`
+> is false — preserving the original guard against muni‑wide invented matches (5.5).
 
 ## 5.7 Municipality exact fallback / ambiguity (step 10)
 

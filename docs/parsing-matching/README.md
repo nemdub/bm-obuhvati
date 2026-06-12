@@ -52,9 +52,10 @@ rules must stay in lock‑step with stage04, which is why it gets its own docume
   punctuation dropped, whitespace collapsed. Examples are shown in normalized (UPPERCASE
   Cyrillic) form when illustrating a match key.
 - **Settlement scope / muni scope.** Matching is *settlement‑first*: a station's home
-  settlement (parsed from its address) is the default scope, with the municipality as
-  fallback. Many rules apply ONLY in settlement scope — that distinction is load‑bearing
-  and is called out per rule.
+  settlement (parsed from its address, or — for town stations with no address prefix —
+  inferred as the eponymous town settlement, see [05](05-street-resolution.md) §5.1.1) is the
+  default scope, with the municipality as fallback. Many rules apply ONLY in settlement scope
+  — that distinction is load‑bearing and is called out per rule.
 - **group_rep.** Cities are split into city‑municipalities in the register. Matching scope
   is keyed by the *group representative* municipality (`config.group_rep`) so a single city
   document resolves streets across all its members. Where a rule says "municipality" it

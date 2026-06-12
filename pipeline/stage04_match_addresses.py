@@ -85,18 +85,40 @@ def build_indexes():
     for sid, muni, name in zip(settlements["id"], settlements["municipality_id"], settlements["name_cyr"]):
         settlements_by_muni.setdefault(config.group_rep(muni), []).append((sid, normalize_street(name)))
 
+    # Eponymous town settlement per municipality: the settlement whose name matches the
+    # municipality's (Ваљево muni -> Ваљево town; Нови Београд -> "Београд (Нови Београд)"
+    # via the word-containment fallback in resolve_settlement). Stations in the town list
+    # streets without a settlement prefix in their address, so their home settlement can't
+    # be derived from the address — it defaults here. Verified: a no-settlement station is
+    # a town station (rural stations name their village as the address).
+    municipalities = pl.read_parquet(config.MUNICIPALITIES_PARQUET)
+    muni_name = dict(zip(municipalities["id"].cast(str), municipalities["name_cyr"]))
+    town_settlement: dict[str, str | None] = {
+        gmuni: (resolve_settlement(muni_name[gmuni], gmuni, settlements_by_muni)
+                if gmuni in muni_name else None)
+        for gmuni in settlements_by_muni
+    }
+
     # station scope = the group rep of the station's municipality.
     station_muni = {sid: config.group_rep(m) for sid, m in zip(stations["id"], stations["municipality_id"])}
     station_settlement: dict[int, str | None] = {}
+    # Stations whose settlement was INFERRED from the town fallback (address had no settlement
+    # prefix). They are genuinely in the town, but the town doc may reference a peri-urban
+    # street the register files under a neighbouring settlement — so, like a no-settlement
+    # station, they still get the strict municipality-wide fuzzy last resort.
+    station_settlement_inferred: set[int] = set()
     for sid, addr in zip(stations["id"], stations["address_cyr"]):
-        station_settlement[sid] = resolve_settlement_from_address(addr, station_muni[sid], settlements_by_muni)
+        from_addr = resolve_settlement_from_address(addr, station_muni[sid], settlements_by_muni)
+        station_settlement[sid] = from_addr or town_settlement.get(station_muni[sid])
+        if from_addr is None and station_settlement[sid] is not None:
+            station_settlement_inferred.add(sid)
     # settlement id -> all its street ids (for village-name coverage claims).
     sett_to_streets: dict[str, list[str]] = {}
     for sid, meta in street_meta.items():
         sett_to_streets.setdefault(meta["settlement_id"], []).append(sid)
 
     return (street_meta, by_muni_norm, by_sett_norm, addr_by_street, settlements_by_muni,
-            station_muni, station_settlement, sett_to_streets)
+            station_muni, station_settlement, sett_to_streets, station_settlement_inferred)
 
 
 def resolve_settlement(settlement_raw, muni, settlements_by_muni) -> str | None:
@@ -221,7 +243,7 @@ _ALIASES = {
 }
 
 
-def resolve_street(street_raw, muni, settlement_id, idx
+def resolve_street(street_raw, muni, settlement_id, idx, settlement_inferred=False
                    ) -> tuple[str | None, str, float, list[str]]:
     """Resolve a street name to a register street id, scoped to the station's settlement
     first, then municipality. Returns (street_id, method, score, ambiguous_ids).
@@ -310,19 +332,20 @@ def resolve_street(street_raw, muni, settlement_id, idx
         if len(ids) == 1:
             return ids[0], ("muni_fallback" if settlement_id else exact_method), 100.0, []
         return None, "ambiguous", 0.0, ids
-    # Municipality-wide fuzzy — ONLY for stations with no home settlement (Belgrade/Niš
-    # city-munis, whose addresses carry no settlement head, so the settlement-scoped fuzzy
-    # above never runs and a one-letter doc typo like "Михаила"->"Михајла" Пупина would
-    # otherwise fall through to no_match). Stricter cutoff + single-candidate guard; flagged
-    # 'fuzzy' so the reviewer sees the doc->register name discrepancy and confirms.
-    if not settlement_id:
+    # Municipality-wide fuzzy — for stations with no home settlement OR an inferred town
+    # scope (Belgrade/Niš/Valjevo-style town stations, whose addresses carry no settlement
+    # head, so the settlement-scoped fuzzy above never finds a street the register files
+    # under a neighbouring settlement; a one-letter doc typo like "Михаила"->"Михајла" Пупина
+    # would otherwise fall through to no_match). Stricter cutoff + single-candidate guard;
+    # flagged 'fuzzy' so the reviewer sees the doc->register name discrepancy and confirms.
+    if not settlement_id or settlement_inferred:
         hit = _fuzzy_muni_unique(primary, muni_scope, config.STREET_FUZZY_MUNI_MIN)
         if hit:
             return hit[0], "fuzzy", hit[1], []
     # Village-name coverage: some stations name a whole SETTLEMENT instead of streets
     # ("Белосавци" in Topola). If the name matches a settlement in the municipality,
     # LAST RESORT — only when no street matches anywhere in the municipality (otherwise it hijacks cross-settlement street matches); claim every street in it (extra ids ride in the 4th slot, method 'settlement').
-    _, _, _, _, setts_by_muni, _, _, sett_to_streets = idx
+    setts_by_muni, sett_to_streets = idx[4], idx[7]
     sett_key = primary[len("НАСЕЉЕ "):] if primary.startswith("НАСЕЉЕ ") else primary
     for s_id, s_norm in setts_by_muni.get(muni, []):
         if s_norm == sett_key:
@@ -456,7 +479,7 @@ def main() -> int:
     config.ensure_artifacts()
     idx = build_indexes()
     (street_meta, _bmn, _bsn, addr_by_street, settlements_by_muni,
-     station_muni, station_settlement, _sett_streets) = idx
+     station_muni, station_settlement, _sett_streets, station_settlement_inferred) = idx
 
     segs = pl.read_parquet(config.SEGMENTS_AMENDED_PARQUET).to_dicts()
     # Incremental scope: keep only segments whose station is in an affected municipality.
@@ -480,11 +503,13 @@ def main() -> int:
         parsed = json.loads(s["parsed_json"])
         # Scope to the segment's own settlement if labelled, else the station's home
         # settlement (from its address); falls back to municipality inside resolve_street.
-        settlement_id = (
-            resolve_settlement(s["settlement_raw"], muni, settlements_by_muni)
-            or station_settlement.get(s["station_id"])
-        )
-        street_id, method, score, amb_ids = resolve_street(s["street_raw"], muni, settlement_id, idx)
+        seg_sett = resolve_settlement(s["settlement_raw"], muni, settlements_by_muni)
+        settlement_id = seg_sett or station_settlement.get(s["station_id"])
+        # The scope is an INFERRED town only when neither the segment nor the address pinned
+        # a settlement — that's when the muni-wide fuzzy last resort still applies.
+        settlement_inferred = seg_sett is None and s["station_id"] in station_settlement_inferred
+        street_id, method, score, amb_ids = resolve_street(
+            s["street_raw"], muni, settlement_id, idx, settlement_inferred)
 
         # Apply reviewer override: manual street wins (if it exists in the register) and
         # manual number edits replace the machine parse for claim building. A "sett:<id>"
