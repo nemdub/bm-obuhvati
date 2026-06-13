@@ -182,6 +182,44 @@ class TestSettlementClaim:
         assert sid == "st2" and amb == ["st3"]
 
 
+class TestLocality:
+    """Sub-locality / hamlet (заселак) claim (§5.x): the register encodes a locality with no
+    own naselje as a PREFIX on several streets of the parent settlement ('Ранчево' in Sombor →
+    'РАНЧЕВО ХИЛАНДАРСКА', 'ЗАСЕЛАК РАНЧЕВО РЕЛИЋИ', …). A single-word coverage claims them all."""
+
+    def test_locality_claims_all_prefixed_streets(self):
+        idx = make_index(
+            {"S1": {
+                "a": "Ранчево Хиландарска",
+                "b": "Ранчево Вука Караџића",
+                "c": "Заселак Ранчево Релићи",
+                "d": "Главна",  # unrelated street, must NOT be claimed
+            }},
+            {"S1": "Сомбор"},
+        )
+        sid, method, score, amb = S4.resolve_street("Ранчево", MUNI, "S1", idx)
+        assert method == "locality"
+        assert sid == "a" and sorted([sid] + amb) == ["a", "b", "c"]
+
+    def test_single_prefixed_street_is_not_a_locality(self):
+        # Only ONE 'Ранчево …' street -> not a cluster, so no locality claim.
+        idx = make_index({"S1": {"a": "Ранчево Хиландарска", "b": "Главна"}}, {"S1": "Сомбор"})
+        assert S4.resolve_street("Ранчево", MUNI, "S1", idx)[1] != "locality"
+
+    def test_generic_prefix_word_is_not_a_locality(self):
+        # 'Заселак' (hamlet) is a generic structural word, not a locality name -> no claim.
+        idx = make_index(
+            {"S1": {"a": "Заселак Криваја", "b": "Заселак Релићи", "c": "Главна"}},
+            {"S1": "Сомбор"},
+        )
+        assert S4.resolve_street("Заселак", MUNI, "S1", idx)[1] != "locality"
+
+    def test_numbered_parts_are_not_locality(self):
+        # Numbered parts stay base_parts (numeric remainder excluded from locality).
+        idx = make_index({"S1": {"a": "Војни Пут 1", "b": "Војни Пут 2"}}, {"S1": "Сомбор"})
+        assert S4.resolve_street("Војни Пут", MUNI, "S1", idx)[1] == "base_parts"
+
+
 class TestAlias:
     def test_alias_substitution(self, monkeypatch):
         idx = make_index({"S1": {"st1": "Хероја Пинкија"}}, {"S1": "Прво Село"})

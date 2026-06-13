@@ -94,6 +94,7 @@ Tried in order; first hit wins. `primary` = normalized name with any parenthetic
 | 5 | `... 1 ДЕО` → base name | `exact`/`muni_fallback` | settlement, then muni‑unique |
 | 6 | strip‑`УЛИЦА` → base | `exact`/`muni_fallback` | settlement, then muni‑unique |
 | 7 | `_part_streets` (base → numbered parts) | `base_parts` (flagged) | settlement, then muni |
+| 7a | `_locality_streets` (single word → заселак/locality cluster) | `locality` (flagged) | **settlement only** |
 | 8 | `_fuzzy(primary)` | `fuzzy` (flagged) | **settlement only** |
 | 9 | `_token_subset(primary)` | `fuzzy` (flagged) | settlement |
 | 10 | muni exact (`primary`, then `alt`) | `muni_fallback` / `ambiguous` / `exact` | muni |
@@ -295,6 +296,38 @@ review, with the Worker appending the „doc name“ → „register name“ dis
 **Incremental `--municipalities`** stays correct: it loads *all* segments of the affected
 `group_rep` munis and proximity is muni‑scoped, so the `claimed` snapshot and the
 per‑station anchors are complete within scope.
+
+## 5.15 Sub-locality / hamlet (заселак) claims (`_locality_streets`)
+
+**Rule:** some inhabited localities have **no own naselje** in the register — they're encoded
+as a **name prefix on several streets of the parent settlement**. Sombor #10 covers
+„Ранчево", which the register stores as 5 streets in the СОМБОР naselje: `РАНЧЕВО ХИЛАНДАРСКА`,
+`РАНЧЕВО ВУКА КАРАЏИЋА`, `РАНЧЕВО ЖАРКА ЗРЕЊАНИНА`, `РАНЧЕВО-МИЛУНКЕ САВИЋ`,
+`ЗАСЕЛАК РАНЧЕВО РЕЛИЋИ`. A **single-word** coverage that is the locality token of **≥2
+distinct** such streets claims them all (anchor + rest in `ambiguous_ids`). Method `locality`,
+score 80, conf 0.7, reason `locality` (flagged). Placed before `_fuzzy` so the cluster isn't
+hijacked into matching just one of its streets (the pre-existing bug: „Ранчево" linked 8 of 63
+addresses).
+
+The locality token is the street's **first** word, or the word right after a leading
+`ЗАСЕЛАК`. Guards keep it from inventing clusters:
+- **single-word, non-numeric** `primary` (a multi-word „ЦАРА ДУШАНА" can't sweep „ЦАРА ЛАЗАРА");
+- **canonical names only** — `by_sett_norm` also holds declension/sortkey *alt* keys that
+  point back at the same or an unrelated street (`НИКОЛЕ ЛУЊЕВИЦЕ` surfaces under the alt key
+  `ЛУЊЕВИЦА …`; `ДОЊА БРДА МАЛА` under the sortkey `БРДА …`); only a key equal to its street's
+  `name_norm` counts;
+- **≥2 distinct street ids** (so one street under two declension keys isn't a "cluster");
+- a **stoplist** of generic structural words (`_LOCALITY_STOP`: ЗАСЕЛАК, НАСЕЉЕ, САЛАШ, ПОТЕС,
+  МАХАЛА, ПУТ, БЛОК, ТРГ, КРАЈ, …) that lead many unrelated streets.
+
+Nationwide this resolves 4 genuine localities (Ранчево, Шапоње, Билић, Багљаш); each is
+flagged for review.
+
+> Note: this is **not** a settlement — Ранчево is absent from both the register settlements
+> and `data/naselje.csv`. A settlement-polygon source cannot cover it; the locality claim is
+> the right mechanism. See 5.12 for *real* whole-settlement (village) claims.
+
+## 5.14 (cont.) Proximity worked example
 
 > Worked example — `Рзавска` (Arilje area): the doc street isn't in the station's home
 > settlement, and `РЗАВСКА` exists in several settlements, so the ladder returns

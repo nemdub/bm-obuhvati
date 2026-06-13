@@ -33,7 +33,7 @@ import time
 
 import polars as pl
 from pyproj import Transformer
-from shapely import wkt as shapely_wkt
+from shapely import make_valid, wkt as shapely_wkt
 from shapely.geometry import mapping
 from shapely.ops import transform as shapely_transform
 

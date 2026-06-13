@@ -196,6 +196,51 @@ def _part_streets(primary: str, scope: dict[str, list[str]]) -> list[str]:
     return out
 
 
+# Generic structural / common-noun words that are NOT locality names: they lead many
+# unrelated register streets, so a bare coverage of one of them must not sweep them all up
+# ("Заселак" → every ЗАСЕЛАК… street; "Насеље" → every НАСЕЉЕ… street; "Пут" → every road).
+_LOCALITY_STOP = {"ЗАСЕЛАК", "НАСЕЉЕ", "НАСЕЉЕНО", "САЛАШ", "ПОТЕС", "МАХАЛА",
+                  "ПУТ", "БЛОК", "ТРГ", "КРАЈ", "СОКАК", "УЛИЦА", "ДЕО", "НОВА", "СТАРА"}
+
+
+def _locality_streets(primary: str, scope: dict[str, list[str]], street_meta: dict[str, dict]
+                      ) -> list[str]:
+    """Sub-locality / hamlet (заселак) claim. The register has no separate naselje for some
+    localities — it encodes them as a PREFIX on several street names within the parent
+    settlement: doc "Ранчево" (Sombor) → "РАНЧЕВО ХИЛАНДАРСКА", "РАНЧЕВО ВУКА КАРАЏИЋА",
+    "ЗАСЕЛАК РАНЧЕВО РЕЛИЋИ", … A single-word coverage that is the locality token of two or
+    more such streets claims them all.
+
+    The locality token is the street's FIRST word, or the word right after a leading
+    "ЗАСЕЛАК". The remainder must be a NAME (not all-numeric — numbered parts are
+    `_part_streets`' job, e.g. "ВОЈНИ ПУТ 1/2"). Guards against false localities:
+      - `primary` is single-word and non-numeric (a locality name isn't "8");
+      - only CANONICAL street names are considered (a key whose street's `name_norm` equals
+        the key) — `scope` also holds declension/sortkey ALT keys pointing at the same or an
+        unrelated street, which would otherwise fake a cluster ("ДОЊА БРДА МАЛА" surfaces
+        under the sortkey "БРДА …"; "НИКОЛЕ ЛУЊЕВИЦЕ" under "ЛУЊЕВИЦА …");
+      - a real locality has >=2 DISTINCT street ids (deduped here)."""
+    if not primary or " " in primary or primary.isdigit() or primary in _LOCALITY_STOP:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for name, ids in scope.items():
+        toks = name.split()
+        if len(toks) >= 2 and toks[0] == primary:
+            rest = toks[1:]
+        elif len(toks) >= 3 and toks[0] == "ЗАСЕЛАК" and toks[1] == primary:
+            rest = toks[2:]
+        else:
+            continue
+        if not rest or all(w.isdigit() or w == "ДЕО" for w in rest):
+            continue
+        for i in ids:
+            if i not in seen and street_meta.get(i, {}).get("name_norm") == name:  # canonical only
+                seen.add(i)
+                out.append(i)
+    return out
+
+
 def _sortkey(norm: str) -> str | None:
     """Order-insensitive token key — Hungarian names appear in both orders ("Дожа Ђерђа" /
     "Ђерђа Доже"). Single-word names return None (key would equal the name)."""
@@ -422,6 +467,12 @@ def resolve_street(street_raw, muni, settlement_id, idx, settlement_inferred=Fal
     parts = _part_streets(primary, sett_scope) or _part_streets(primary, muni_scope)
     if parts:
         return parts[0], "base_parts", 90.0, parts[1:]
+    # Sub-locality / hamlet (заселак): a single-word coverage that prefixes >=2 streets in the
+    # home settlement ("Ранчево" -> all "РАНЧЕВО …" streets) claims them all. Before fuzzy so
+    # it doesn't get hijacked into matching just one of the cluster's streets.
+    loc = _locality_streets(primary, sett_scope, idx[0])
+    if len(loc) >= 2:
+        return loc[0], "locality", 80.0, loc[1:]
     # Fuzzy ONLY on the primary key, ONLY within the station's own settlement (catches
     # typos in the right place). Never fuzzy municipality-wide (invents matches for
     # nonexistent streets) and never fuzzy the parenthetical alternate.
@@ -679,7 +730,7 @@ def main() -> int:
         # 'base_parts': a plain base name claims every numbered part street (extras ride
         # in amb_ids), each with the same parsed numbers.
         targets = [street_id] + (
-            r["amb_ids"] if r["method"] in ("base_parts", "settlement", "manual_settlement") else [])
+            r["amb_ids"] if r["method"] in ("base_parts", "locality", "settlement", "manual_settlement") else [])
         whole_kind = "sett_whole" if r["method"] in ("settlement", "manual_settlement") else "whole"
         _emit_claims(claims_by_street, s["id"], s["station_id"], parsed, targets, whole_kind)
 
@@ -751,7 +802,7 @@ def main() -> int:
     for r in seg_recs:
         if not r["street_id"] or r["old_name_dup"]:
             continue
-        extra = r["amb_ids"] if r["method"] in ("base_parts", "settlement", "manual_settlement") else []
+        extra = r["amb_ids"] if r["method"] in ("base_parts", "locality", "settlement", "manual_settlement") else []
         for tid in (r["street_id"], *extra):
             c = street_centroid.get(tid)
             if c:
@@ -877,6 +928,11 @@ def main() -> int:
             # Plain base name expanded to all numbered part streets — confirmable.
             conf = 0.7
             reasons.append("base_parts")
+        elif method == "locality":
+            # Single-word coverage expanded to all streets of a register sub-locality/hamlet
+            # (заселак prefix) — confirmable.
+            conf = 0.7
+            reasons.append("locality")
         elif method == "settlement":
             # Village-name coverage: the whole settlement is claimed — confirmable.
             conf = 0.8
