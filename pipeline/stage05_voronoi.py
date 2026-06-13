@@ -37,7 +37,7 @@ from shapely.geometry import MultiPoint, Point, Polygon, mapping
 from shapely.ops import transform as shp_transform, unary_union
 
 import config
-from common.boundaries import load_muni_boundaries
+from common.boundaries import load_muni_boundaries, load_settlement_boundaries
 
 UNASSIGNED = -1
 _TO_WGS84 = Transformer.from_crs(config.UTM_34N, config.WGS84, always_xy=True)
@@ -297,11 +297,32 @@ def main() -> int:
             station_cells.setdefault(sid, []).extend(cells)
     settlements = sett_codes  # for the summary line
 
+    # Whole-settlement coverage: a station that claims a whole settlement gets the official
+    # naselje boundary as its coverage polygon (unioned with any point-Voronoi cells it also
+    # has), instead of the ragged point-cloud shape. Boundaries come from data/naselje.csv
+    # via stage01's settlement_geometry.parquet (UTM, same CRS as the cells).
+    claim_geom: dict[int, object] = {}
+    if config.STATION_SETT_CLAIMS_PARQUET.exists():
+        sc = pl.read_parquet(config.STATION_SETT_CLAIMS_PARQUET)
+        if affected is not None:
+            sc = sc.filter(pl.col("station_id").is_in(list(affected)))
+        sbound = load_settlement_boundaries(set(sc["settlement_id"].to_list()))
+        for (sid,), grp in sc.group_by("station_id"):
+            geoms = [sbound[s] for s in grp["settlement_id"].to_list() if s in sbound]
+            if geoms:
+                claim_geom[int(sid)] = geoms[0] if len(geoms) == 1 else unary_union(geoms)
+
     rows: list[dict] = []
     now = datetime.now(timezone.utc).isoformat()
     n_clipped = 0
-    for sid, cells in station_cells.items():
-        merged = unary_union(cells).buffer(0)
+    n_sett = 0
+    for sid in set(station_cells) | set(claim_geom):
+        parts = list(station_cells.get(sid, []))
+        cg = claim_geom.get(sid)
+        if cg is not None:
+            parts.append(cg)
+            n_sett += 1
+        merged = unary_union(parts).buffer(0)
         if merged.is_empty:
             continue
         clip = clip_geoms.get(sid)
@@ -369,6 +390,7 @@ def main() -> int:
         print(
             f"  settlements: {len(settlements):,}  station polygons: {len(rows):,}"
             f"  clipped to muni boundary: {n_clipped:,}  boundaries: {len(brows):,}"
+            f"  settlement-claim polygons: {n_sett:,}"
         )
     else:
         print(

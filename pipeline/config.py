@@ -15,6 +15,7 @@ ARTIFACTS_DIR = PIPELINE_DIR / "artifacts"
 
 REGISTER_CSV = DATA_DIR / "kucni_broj.csv"
 ULICA_CSV = DATA_DIR / "ulica.csv"   # official street register (authoritative street list + line geometry)
+NASELJE_CSV = DATA_DIR / "naselje.csv"   # official settlement (naselje) boundary polygons (UTM34N WKT)
 DOCS_DIR = DATA_DIR / "polling_stations_2022"
 OPSTINE_GEOJSON = DATA_DIR / "opstine.geojson"   # official municipality boundaries (WGS84)
 GRADOVI_GEOJSON = DATA_DIR / "gradovi.geojson"   # companion city layer (optional; fills munis missing above)
@@ -25,6 +26,8 @@ MUNICIPALITIES_PARQUET = ARTIFACTS_DIR / "municipalities.parquet"
 SETTLEMENTS_PARQUET = ARTIFACTS_DIR / "settlements.parquet"
 STREETS_PARQUET = ARTIFACTS_DIR / "streets.parquet"
 STREET_GEOMETRY_PARQUET = ARTIFACTS_DIR / "street_geometry.parquet"  # WGS84 line geometry for no-house streets
+SETTLEMENT_GEOMETRY_PARQUET = ARTIFACTS_DIR / "settlement_geometry.parquet"  # UTM34N settlement boundary polygons (WKT)
+STATION_SETT_CLAIMS_PARQUET = ARTIFACTS_DIR / "station_settlement_claims.parquet"  # station_id -> claimed settlement_id (whole-settlement coverage)
 STATIONS_PARQUET = ARTIFACTS_DIR / "stations.parquet"
 AMENDMENTS_RAW_PARQUET = ARTIFACTS_DIR / "amendments_raw.parquet"  # raw amendment doc text
 SEGMENTS_RAW_PARQUET = ARTIFACTS_DIR / "segments_raw.parquet"        # stage03 output

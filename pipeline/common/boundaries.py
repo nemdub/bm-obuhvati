@@ -17,6 +17,7 @@ import json
 
 import polars as pl
 import shapely
+from shapely import wkt as shapely_wkt
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as shp_transform
@@ -38,6 +39,27 @@ def _to_utm_valid(geom_json: dict) -> BaseGeometry:
 def _norm_name(s: str) -> str:
     s = s.upper().strip()
     return s.removeprefix("GRAD ").strip()
+
+
+def load_settlement_boundaries(only_ids: set[str] | None = None) -> dict[str, BaseGeometry]:
+    """{settlement_id: boundary polygon (UTM 34N, valid)} from settlement_geometry.parquet
+    (built by stage01 from data/naselje.csv; the WKT is already UTM, so no reprojection).
+    Pass ``only_ids`` to load just the settlements you need (e.g. the whole-settlement
+    claims). Returns {} if the artifact is absent (optional layer)."""
+    if not config.SETTLEMENT_GEOMETRY_PARQUET.exists():
+        return {}
+    df = pl.read_parquet(config.SETTLEMENT_GEOMETRY_PARQUET)
+    out: dict[str, BaseGeometry] = {}
+    for sid, w in zip(df["settlement_id"], df["wkt"]):
+        if only_ids is not None and sid not in only_ids:
+            continue
+        try:
+            g = shapely.make_valid(shapely_wkt.loads(w))
+        except Exception:
+            continue
+        if not g.is_empty:
+            out[sid] = g
+    return out
 
 
 def load_muni_boundaries() -> dict[str, BaseGeometry]:

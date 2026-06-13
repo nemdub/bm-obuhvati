@@ -742,6 +742,9 @@ def main() -> int:
     # segments with deterministic ids (ADDED_SEG_BASE + addition id), claims like any
     # other, and materialized into coverage_segments so links keep FK integrity.
     # A "sett:<id>" street_id is a whole-settlement claim from the area-aware picker.
+    # Whole-settlement coverage claims (station -> settlement). stage05 uses the official
+    # naselje boundary as the coverage polygon for these instead of the point-Voronoi shape.
+    sett_claims: list[dict] = []
     added_out: list[dict] = []
     if config.ADDITIONS_JSON.exists():
         additions = json.loads(config.ADDITIONS_JSON.read_text())
@@ -771,6 +774,8 @@ def main() -> int:
             # Settlement claims yield to any street-level claim, like document ones.
             whole_kind = "sett_whole" if sett_id else "whole"
             _emit_claims(claims_by_street, seg_id, a["station_id"], parsed, targets, whole_kind)
+            if sett_id:
+                sett_claims.append({"station_id": a["station_id"], "settlement_id": sett_id})
             sname = sett_names.get(sett_id, sett_id) if sett_id else None
             added_out.append({
                 "id": seg_id, "station_id": a["station_id"], "settlement_raw": None,
@@ -924,6 +929,9 @@ def main() -> int:
             reasons.append("alias")
         elif method in ("manual", "manual_settlement"):
             conf = 0.9  # reviewer-assigned street/settlement; no flag
+            if method == "manual_settlement" and r["street_id"] in street_meta:
+                sett_claims.append({"station_id": r["station_id"],
+                                    "settlement_id": street_meta[r["street_id"]]["settlement_id"]})
         elif method == "base_parts":
             # Plain base name expanded to all numbered part streets — confirmable.
             conf = 0.7
@@ -936,7 +944,9 @@ def main() -> int:
         elif method == "settlement":
             # Village-name coverage: the whole settlement is claimed — confirmable.
             conf = 0.8
-            sname = sett_names.get(street_meta[r["street_id"]]["settlement_id"], "")
+            claim_sett = street_meta[r["street_id"]]["settlement_id"]
+            sett_claims.append({"station_id": r["station_id"], "settlement_id": claim_sett})
+            sname = sett_names.get(claim_sett, "")
             reasons.append("settlement_claim:" + sname if sname else "settlement_claim")
         elif method == "muni_fallback":
             conf = 0.4
@@ -979,9 +989,14 @@ def main() -> int:
 
     out_segs.extend(added_out)
 
+    sett_claims_df = pl.DataFrame(
+        sett_claims, schema={"station_id": pl.Int64, "settlement_id": pl.String}
+    ).unique()
+
     if municipalities is None:
         pl.DataFrame(out_segs, infer_schema_length=None).write_parquet(config.SEGMENTS_PARQUET)
         pl.DataFrame(links, infer_schema_length=None).write_parquet(config.LINKS_PARQUET)
+        sett_claims_df.write_parquet(config.STATION_SETT_CLAIMS_PARQUET)
     else:
         # Merge into the complete parquets: drop every affected station's old segments and
         # links, then append the freshly matched ones (segment ids preserved). Untouched
@@ -999,6 +1014,16 @@ def main() -> int:
                 pl.DataFrame(links, infer_schema_length=None).select(prev_links.columns))
         pl.concat(seg_parts, how="vertical_relaxed").write_parquet(config.SEGMENTS_PARQUET)
         pl.concat(link_parts, how="vertical_relaxed").write_parquet(config.LINKS_PARQUET)
+        # Settlement-claim map: drop affected stations' rows, append the fresh ones.
+        if config.STATION_SETT_CLAIMS_PARQUET.exists():
+            prev_sc = pl.read_parquet(config.STATION_SETT_CLAIMS_PARQUET)
+            sc_parts = [prev_sc.filter(~pl.col("station_id").is_in(affected))]
+            if sett_claims_df.height:
+                sc_parts.append(sett_claims_df.select(prev_sc.columns))
+            pl.concat(sc_parts, how="vertical_relaxed").unique().write_parquet(
+                config.STATION_SETT_CLAIMS_PARQUET)
+        else:
+            sett_claims_df.write_parquet(config.STATION_SETT_CLAIMS_PARQUET)
 
     n_review = sum(x["needs_review"] for x in out_segs)
     n_unres = sum(1 for x in out_segs if x["street_id"] is None)

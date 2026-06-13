@@ -62,6 +62,13 @@ ULICA_COLS = [
 # keeps the no-house-street geometry payload small without visibly distorting it.
 STREET_GEOM_SIMPLIFY_M = 5.0
 
+# Settlement boundary polygons are only used as coverage for whole-settlement claims, so a
+# coarser tolerance is fine and keeps the stored WKT small.
+SETTLEMENT_GEOM_SIMPLIFY_M = 15.0
+
+# naselje.csv columns we keep (settlement boundary polygons; WKT is UTM 34N).
+NASELJE_COLS = ["naselje_maticni_broj", "opstina_imel", "wkt"]
+
 # UTM 34N -> WGS84 for street line geometry (shapely-friendly, via pyproj).
 _TO_WGS84 = Transformer.from_crs(config.UTM_34N, config.WGS84, always_xy=True)
 
@@ -195,6 +202,35 @@ def build_street_geometry(ulica: pl.DataFrame, house_ids: set[str]) -> pl.DataFr
     return pl.DataFrame(rows, schema={"street_id": pl.String, "geojson": pl.String})
 
 
+def build_settlement_geometry(wanted: list[str] | None) -> pl.DataFrame:
+    """Official settlement (naselje) boundary polygons, kept in UTM 34N (the source WKT is
+    already UTM — no reprojection). Validity-fixed and lightly simplified; stored as WKT for
+    stage05 to use as the coverage polygon of whole-settlement claims. Returns empty if the
+    source file is absent (optional layer)."""
+    if not config.NASELJE_CSV.exists():
+        print("  naselje.csv not found — skipping settlement geometry")
+        return pl.DataFrame(schema={"settlement_id": pl.String, "wkt": pl.String})
+    lf = pl.scan_csv(config.NASELJE_CSV, infer_schema_length=0).select(NASELJE_COLS)
+    if wanted is not None:
+        lf = lf.filter(pl.col("opstina_imel").str.to_uppercase().is_in(wanted))
+    nas = lf.collect()
+    rows: list[dict[str, str]] = []
+    for sid, w in zip(nas["naselje_maticni_broj"], nas["wkt"]):
+        if not w:
+            continue
+        try:
+            g = shapely_wkt.loads(w)
+        except Exception:
+            continue
+        if g.is_empty:
+            continue
+        g = make_valid(g.simplify(SETTLEMENT_GEOM_SIMPLIFY_M, preserve_topology=True).buffer(0))
+        if g.is_empty:
+            continue
+        rows.append({"settlement_id": sid, "wkt": g.wkt})
+    return pl.DataFrame(rows, schema={"settlement_id": pl.String, "wkt": pl.String})
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Load + normalize the address + street register.")
     ap.add_argument(
@@ -245,6 +281,7 @@ def main() -> int:
 
     house_ids = set(addr_full["street_id"].to_list())
     street_geometry = build_street_geometry(ulica, house_ids)
+    settlement_geometry = build_settlement_geometry(wanted)
 
     # City-municipality groups: add parent_id (members point to their rep so the UI can
     # hide them) and apply any rep display-name override.
@@ -270,6 +307,8 @@ def main() -> int:
     settlements.write_parquet(config.SETTLEMENTS_PARQUET)
     streets.write_parquet(config.STREETS_PARQUET)
     street_geometry.write_parquet(config.STREET_GEOMETRY_PARQUET)
+    settlement_geometry.write_parquet(config.SETTLEMENT_GEOMETRY_PARQUET)
+    print(f"  settlement boundary polygons: {settlement_geometry.height:,}")
     print(f"  wrote artifacts in {time.time()-t0:.1f}s")
     return 0
 
