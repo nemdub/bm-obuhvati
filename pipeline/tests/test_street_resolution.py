@@ -193,3 +193,78 @@ class TestAlias:
 class TestNoMatch:
     def test_unresolvable(self, idx):
         assert S4.resolve_street("Непостојећа Улица", MUNI, "S1", idx)[:2] == (None, "none")
+
+
+class TestSettlementFromAddress:
+    """`resolve_settlement_from_address` (§5.1): the home settlement may be the FIRST comma
+    token (settlement-first, 'КЕЛЕБИЈА, ПУТ …') or the LAST (settlement-last, Beočin
+    'Јована Грчића Миленка 5, Черевић'). First wins; last is the fallback."""
+
+    SBM = {MUNI: [("S1", ns("Черевић")), ("S2", ns("Келебија"))]}
+
+    def test_settlement_first(self):
+        assert S4.resolve_settlement_from_address("Келебија, Пут 5", MUNI, self.SBM) == "S2"
+
+    def test_settlement_last(self):
+        assert S4.resolve_settlement_from_address(
+            "Јована Грчића Миленка 5, Черевић", MUNI, self.SBM) == "S1"
+
+    def test_no_settlement_token(self):
+        # A pure town address (street only, no settlement) stays unresolved -> inferred town.
+        assert S4.resolve_settlement_from_address("Трг Слободе бб", MUNI, self.SBM) is None
+
+
+class TestStationAnchor:
+    """`_station_anchor` (§5.7): centroid of a station's resolved-street centroids plus an
+    adaptive radius clamped to [FLOOR, CAP]. Coords are UTM meters."""
+
+    def test_no_resolved_streets_is_none(self):
+        assert S4._station_anchor([]) is None
+
+    def test_single_street_uses_floor_radius(self):
+        cx, cy, radius = S4._station_anchor([(1000.0, 2000.0)])
+        assert (cx, cy) == (1000.0, 2000.0)              # centroid is the point itself
+        assert radius == S4.config.PROXIMITY_RADIUS_FLOOR_M  # extent 0 -> floor
+
+    def test_radius_scales_with_extent(self):
+        # centroid (0, 500); extent 500; radius = FACTOR(2) * 500 = 1000 (within [floor, cap]).
+        cx, cy, radius = S4._station_anchor([(0.0, 0.0), (0.0, 1000.0)])
+        assert (cx, cy) == (0.0, 500.0)
+        assert radius == 1000.0
+
+    def test_radius_clamped_to_cap(self):
+        # extent 2000 -> 2*2000 = 4000, capped to CAP (3000).
+        _, _, radius = S4._station_anchor([(0.0, 0.0), (0.0, 4000.0)])
+        assert radius == S4.config.PROXIMITY_RADIUS_CAP_M
+
+
+class TestNearestUnclaimed:
+    """`_nearest_unclaimed` (§5.7): nearest candidate to the anchor among streets already
+    filtered to unclaimed + within radius. Disambiguation mode (target None) takes the
+    nearest; fuzzy mode keeps only names clearing the cutoff (with the digit guard)."""
+
+    ANCHOR = (0.0, 0.0, 2000.0)
+
+    def test_disambiguation_takes_nearest(self):
+        # Two same-named real streets; the nearer one wins (no fuzzy needed).
+        cands = [("far", ns("Дунавска"), 100.0, 0.0), ("near", ns("Дунавска"), 50.0, 0.0)]
+        assert S4._nearest_unclaimed(self.ANCHOR, cands, None) == ("near", 90.0)
+
+    def test_fuzzy_keeps_only_similar_names(self):
+        # The dissimilar candidate is dropped; the matching one resolves even though farther.
+        cands = [("other", ns("Зелена"), 10.0, 0.0), ("hit", ns("Виноградарска"), 500.0, 0.0)]
+        res = S4._nearest_unclaimed(self.ANCHOR, cands, ns("Виноградарска"))
+        assert res is not None and res[0] == "hit"
+
+    def test_fuzzy_digit_guard_rejects_number_mismatch(self):
+        # "7 ВОЈВОЂАНСКЕ" must not match "8 ВОЈВОЂАНСКЕ" even when nearby.
+        cands = [("st", ns("8 Војвођанске"), 10.0, 0.0)]
+        assert S4._nearest_unclaimed(self.ANCHOR, cands, ns("7 Војвођанске")) is None
+
+    def test_empty_pool_returns_none(self):
+        assert S4._nearest_unclaimed(self.ANCHOR, [], None) is None
+
+    def test_equidistant_rivals_skipped(self):
+        # Two different streets exactly the same distance away -> don't guess.
+        cands = [("a", ns("Дунавска"), 100.0, 0.0), ("b", ns("Дунавска"), -100.0, 0.0)]
+        assert S4._nearest_unclaimed(self.ANCHOR, cands, None) is None

@@ -115,6 +115,7 @@ Picking a street saves `street_id` to the override; "Улица не посто�
 | Aspect | Pipeline (canonical) | Worker (preview) |
 |--------|----------------------|------------------|
 | Cross‑station conflicts | resolved by specificity, flagged | not modeled |
+| Proximity match ([05](05-street-resolution.md) §5.14) | geographic pass over all streets | **not mirrored** — needs the full register spatial index; the Worker just renders the stored result + localizes the `proximity` flag |
 | Bare‑implies‑suffix override | one station wins per house | matches bare to any suffix locally |
 | Polygons | Voronoi in stage05 | reads R2 blobs, no recompute |
 | Street normalization | `normalize_street` (full) | relies on precomputed `name_norm` |

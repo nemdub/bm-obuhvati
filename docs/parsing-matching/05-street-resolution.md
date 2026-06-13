@@ -15,13 +15,22 @@ first and the municipality second. Returns `(street_id, method, score, ambiguous
 Matching is **settlement‑first**. The scope hierarchy:
 
 1. The segment's own `settlement_raw` if labelled (structured dialect), else
-2. the station's **home settlement**, parsed from its address's first comma token
-   (`resolve_settlement_from_address`: `"КЕЛЕБИЈА, ПУТ …"` → `КЕЛЕБИЈА`), else
+2. the station's **home settlement**, parsed from its address
+   (`resolve_settlement_from_address`), else
 3. the **inferred town settlement** (see 5.1.1) when the address has no settlement prefix, else
 4. the **municipality** (group rep) as fallback inside `resolve_street`.
 
 Everything is keyed by `config.group_rep(muni)` so one city document resolves streets across
 all its city‑municipalities.
+
+**Address order — settlement‑first OR settlement‑last.** RIK docs write the station address
+both ways: settlement‑first (`"КЕЛЕБИЈА, ПУТ …"`) and settlement‑last
+(`"Јована Грчића Миленка 5, Черевић"` — Beočin). `resolve_settlement_from_address` tries the
+**first** comma token, then the **last**; first wins (settlement‑first is the common form,
+and a street token rarely resolves to a settlement). Without the last‑token try, a
+settlement‑last station found no home settlement, fell back to the eponymous town (5.1.1),
+and had all its streets scoped muni‑wide — producing spurious `muni_fallback` flags and a
+**conflict storm** as its streets mis‑matched the town's same‑named streets.
 
 ### 5.1.1 Eponymous‑town home‑settlement inference (`build_indexes`)
 
@@ -97,6 +106,9 @@ match is still surfaced for review).
 
 `muni_fallback` is only returned when the station **has** a home settlement (`settlement_id`
 truthy); a station with no settlement gets plain `exact` from muni scope.
+
+The ladder is lexical only. Segments it returns `none`/`ambiguous` for get a second chance
+in the **geographic proximity pass** that runs after pass 1 — see 5.14.
 
 ## 5.4 Parentheticals (`_PAREN_RE`)
 
@@ -245,3 +257,46 @@ After machine resolution, stage04 applies reviewer overrides from `overrides.jso
 - `manual_json` present → replaces the machine parse for claim building.
 
 These mirror the Worker's override resolution (see [08](08-worker-live-preview.md)).
+
+## 5.14 Proximity fallback & disambiguation (post‑ladder pass)
+
+The ladder above is **purely lexical** — it deliberately refuses muni‑wide fuzzy for
+ordinary stations (5.5) because matching by name alone invents matches for nonexistent
+streets. **Geography is the missing constraint that makes a cross‑settlement reach safe
+again:** a polling station covers a contiguous neighbourhood, so a street the ladder left
+unresolved is almost always physically near the streets the station *already* matched — and
+it should be one **no other station has claimed**.
+
+So, *after* pass 1 (and reviewer/added claims) and *before* pass 2, a **proximity pass**
+(`stage04 main()`) revisits every segment whose method is `none` or `ambiguous`:
+
+- **Anchor** (`_station_anchor`): the centroid of the station's already‑resolved‑street
+  centroids (`street_centroid`, built in `build_indexes` from address UTM `x`/`y`). A
+  station with **no** resolved street has no anchor and is **skipped** — there's no sibling
+  coverage to judge proximity against.
+- **Adaptive radius**: `clamp(PROXIMITY_RADIUS_FACTOR × extent, FLOOR, CAP)` where `extent`
+  is the max distance from the centroid to any of the station's resolved streets — tight in
+  dense cities, wider in sparse villages (`config.PROXIMITY_RADIUS_*`).
+- **Candidate pool**: register streets in the station's `group_rep` muni (same scope as the
+  rest of stage04) that are **unclaimed** (not in `claims_by_street`) and have a centroid,
+  indexed per‑muni with a `scipy.spatial.cKDTree` and queried with `query_ball_point`.
+- **Pick** (`_nearest_unclaimed`):
+  - `ambiguous` → restrict candidates to the segment's own same‑named `amb_ids`; take the
+    **nearest unclaimed** one (pure tie‑break among genuinely same‑named real streets).
+  - `none` → keep candidates whose name clears `STREET_FUZZY_PROX_MIN` (reusing `_fuzzy`'s
+    **digit guard**); take the nearest. Two different streets exactly equidistant → skip.
+- On a hit: `method = "proximity"`, the street's claims are emitted (`_emit_claims`) so
+  pass 2 links them like any other claim, and a local `newly_claimed` set stops two
+  unresolved segments grabbing the same street.
+
+Confidence **0.5**, reason `proximity` (flagged) — every proximity match is surfaced for
+review, with the Worker appending the „doc name“ → „register name“ discrepancy (7.5).
+
+**Incremental `--municipalities`** stays correct: it loads *all* segments of the affected
+`group_rep` munis and proximity is muni‑scoped, so the `claimed` snapshot and the
+per‑station anchors are complete within scope.
+
+> Worked example — `Рзавска` (Arilje area): the doc street isn't in the station's home
+> settlement, and `РЗАВСКА` exists in several settlements, so the ladder returns
+> `ambiguous` (nothing linked). The proximity pass picks the `РЗАВСКА` in `АРИЉЕ`, the
+> settlement nearest the station's other matched streets, and links it.

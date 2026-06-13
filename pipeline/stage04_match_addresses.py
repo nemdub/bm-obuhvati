@@ -6,6 +6,13 @@ else rapidfuzz within the station's municipality/settlement), then select the re
 register house numbers it claims (ranges by numeric bound, singles by num+suffix). One
 address is linked to at most one station. Finalizes confidence + needs_review.
 
+A geographic proximity pass then fills segments the lexical ladder left unresolved
+('none'/'ambiguous'): for a street near the station's already-matched coverage that no
+other station has claimed, take the nearest same-named (ambiguous) or fuzzy-close (none)
+register street. Flagged 'proximity' for review. Incremental --municipalities mode loads
+all segments of the affected group_rep munis and proximity is muni-scoped, so its
+'already claimed' snapshot and per-station anchors stay complete within scope.
+
   reads:  segments_amended.parquet, streets/settlements/addresses/stations parquet
   writes: segments.parquet (final, schema-ready), links.parquet
 
@@ -25,10 +32,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
+from collections import defaultdict
 
+import numpy as np
 import polars as pl
 from rapidfuzz import fuzz, process
+from scipy.spatial import cKDTree
 
 import config
 from common.coverage_parse import interval_parity
@@ -38,14 +49,22 @@ FUZZY_MIN = config.STREET_FUZZY_MIN
 
 
 def resolve_settlement_from_address(address: str, muni: str, settlements_by_muni) -> str | None:
-    """A polling station sits in one settlement, named first in its address
-    ('КЕЛЕБИЈА, ПУТ ...'). Use it as the default scope for street resolution."""
+    """A polling station sits in one settlement, named in its address. RIK docs use BOTH
+    orders: settlement-first ('КЕЛЕБИЈА, ПУТ ...') and settlement-last
+    ('Јована Грчића Миленка 5, Черевић' — Beočin). Try the first comma token, then the last;
+    first wins (settlement-first is the common form, and a street rarely resolves), so a
+    settlement-last station gets its real home settlement instead of falling back to the
+    eponymous town (which scoped its streets muni-wide → bogus muni_fallback + conflicts)."""
     if not address:
         return None
-    head = normalize_street(address.split(",")[0])
-    if not head:
-        return None
-    return resolve_settlement(head, muni, settlements_by_muni)
+    parts = [p for p in address.split(",") if p.strip()]
+    for tok in ([parts[0], parts[-1]] if len(parts) > 1 else parts[:1]):
+        head = normalize_street(tok)
+        if head:
+            sid = resolve_settlement(head, muni, settlements_by_muni)
+            if sid:
+                return sid
+    return None
 
 
 def build_indexes():
@@ -76,10 +95,21 @@ def build_indexes():
                 sett[altkey] = [sid]
 
     addr_by_street: dict[str, list[tuple[int, int | None, str]]] = {}
-    for aid, st, num, suf in zip(
-        addresses["id"], addresses["street_id"], addresses["house_num"], addresses["house_suffix"]
+    # Running x/y sums per street → centroid, for the proximity pass. Coords are UTM 34N
+    # meters, so a plain mean and Euclidean distance are correct (no haversine needed).
+    _xy_sum: dict[str, list[float]] = {}
+    for aid, st, num, suf, x, y in zip(
+        addresses["id"], addresses["street_id"], addresses["house_num"], addresses["house_suffix"],
+        addresses["x"], addresses["y"]
     ):
         addr_by_street.setdefault(st, []).append((aid, num, suf or ""))
+        acc = _xy_sum.setdefault(st, [0.0, 0.0, 0.0])
+        acc[0] += x
+        acc[1] += y
+        acc[2] += 1
+    street_centroid: dict[str, tuple[float, float]] = {
+        st: (sx / n, sy / n) for st, (sx, sy, n) in _xy_sum.items() if n
+    }
 
     settlements_by_muni: dict[str, list[tuple[str, str]]] = {}
     for sid, muni, name in zip(settlements["id"], settlements["municipality_id"], settlements["name_cyr"]):
@@ -118,7 +148,8 @@ def build_indexes():
         sett_to_streets.setdefault(meta["settlement_id"], []).append(sid)
 
     return (street_meta, by_muni_norm, by_sett_norm, addr_by_street, settlements_by_muni,
-            station_muni, station_settlement, sett_to_streets, station_settlement_inferred)
+            station_muni, station_settlement, sett_to_streets, station_settlement_inferred,
+            street_centroid)
 
 
 def resolve_settlement(settlement_raw, muni, settlements_by_muni) -> str | None:
@@ -233,6 +264,86 @@ def _fuzzy_muni_unique(norm: str, names_map: dict[str, list[str]],
     if len(ids) != 1:  # same name in multiple settlements of the muni — ambiguous, skip
         return None
     return ids[0], float(score)
+
+
+def _station_anchor(resolved_xy: list[tuple[float, float]]
+                    ) -> tuple[float, float, float] | None:
+    """Centroid of a station's resolved-street centroids + an adaptive search radius.
+
+    `resolved_xy` are the UTM centroids of the streets the station ALREADY matched. The
+    radius scales with the station's own coverage extent (max distance from the centroid to
+    any resolved street), clamped to [FLOOR, CAP]: tight in dense cities, wider in sparse
+    villages. Returns (cx, cy, radius), or None when the station has nothing to anchor on —
+    such stations are skipped (no sibling coverage to judge proximity against)."""
+    if not resolved_xy:
+        return None
+    cx = sum(x for x, _ in resolved_xy) / len(resolved_xy)
+    cy = sum(y for _, y in resolved_xy) / len(resolved_xy)
+    extent = max((math.hypot(x - cx, y - cy) for x, y in resolved_xy), default=0.0)
+    radius = min(max(config.PROXIMITY_RADIUS_FACTOR * extent,
+                     config.PROXIMITY_RADIUS_FLOOR_M), config.PROXIMITY_RADIUS_CAP_M)
+    return cx, cy, radius
+
+
+def _nearest_unclaimed(anchor: tuple[float, float, float],
+                       candidates: list[tuple[str, str, float, float]],
+                       target_norm: str | None) -> tuple[str, float] | None:
+    """Pick the nearest register street to `anchor` among `candidates`
+    = [(street_id, name_norm, x, y)], all pre-filtered to UNCLAIMED streets WITHIN radius.
+
+    Two modes:
+      - disambiguation (`target_norm is None`): candidates are already the right name (the
+        caller restricted them to the segment's same-named `amb_ids`) — just take the
+        nearest.
+      - fuzzy fallback (`target_norm` given): keep candidates whose name clears
+        STREET_FUZZY_PROX_MIN, reusing the digit guard from `_fuzzy`; then take the nearest.
+
+    If the two best candidates are exactly equidistant but different streets, skip — the
+    same don't-guess caution as `_fuzzy_muni_unique`. Returns (street_id, score) or None."""
+    cx, cy, _ = anchor
+    scored: list[tuple[float, str, float]] = []
+    for sid, name, x, y in candidates:
+        if target_norm is not None:
+            r = fuzz.WRatio(target_norm, name)
+            if r < config.STREET_FUZZY_PROX_MIN:
+                continue
+            if _DIGITS_RE.findall(target_norm) != _DIGITS_RE.findall(name):
+                continue
+            score = float(r)
+        else:
+            score = 90.0
+        scored.append((math.hypot(x - cx, y - cy), sid, score))
+    if not scored:
+        return None
+    scored.sort()
+    if len(scored) >= 2 and scored[0][0] == scored[1][0] and scored[0][1] != scored[1][1]:
+        return None  # genuinely equidistant rivals — don't guess
+    return scored[0][1], scored[0][2]
+
+
+def _emit_claims(claims_by_street: dict[str, list[dict]], seg_id: int, station_id: int,
+                 parsed: dict, targets: list[str], whole_kind: str) -> None:
+    """Append a segment's parsed claims (whole / intervals / singles / bez_broja) to
+    `claims_by_street` for each target register street. Shared by the pass-1 claim build,
+    the reviewer-added claims, and the proximity pass."""
+    for tid in targets:
+        if parsed.get("whole"):
+            claims_by_street.setdefault(tid, []).append(
+                {"seg_id": seg_id, "station_id": station_id, "kind": whole_kind})
+        else:
+            for iv in parsed.get("intervals", []):
+                claims_by_street.setdefault(tid, []).append({
+                    "seg_id": seg_id, "station_id": station_id, "kind": "interval",
+                    "lo": iv[0], "hi": iv[1], "parity": _iv_parity(iv),
+                    "losfx": iv[3] if len(iv) > 3 else "", "hisfx": iv[4] if len(iv) > 4 else ""})
+            for num, sfx in parsed.get("singles", []):
+                claims_by_street.setdefault(tid, []).append({
+                    "seg_id": seg_id, "station_id": station_id, "kind": "single",
+                    "num": num, "suffix": sfx})
+        # "бб" is additive: claims the street's no-number houses alongside any ranges.
+        if parsed.get("bez_broja"):
+            claims_by_street.setdefault(tid, []).append(
+                {"seg_id": seg_id, "station_id": station_id, "kind": "bez_broja"})
 
 
 _PAREN_RE = re.compile(r"\(([^)]*)\)")
@@ -479,7 +590,8 @@ def main() -> int:
     config.ensure_artifacts()
     idx = build_indexes()
     (street_meta, _bmn, _bsn, addr_by_street, settlements_by_muni,
-     station_muni, station_settlement, _sett_streets, station_settlement_inferred) = idx
+     station_muni, station_settlement, _sett_streets, station_settlement_inferred,
+     street_centroid) = idx
 
     segs = pl.read_parquet(config.SEGMENTS_AMENDED_PARQUET).to_dicts()
     # Incremental scope: keep only segments whose station is in an affected municipality.
@@ -569,24 +681,7 @@ def main() -> int:
         targets = [street_id] + (
             r["amb_ids"] if r["method"] in ("base_parts", "settlement", "manual_settlement") else [])
         whole_kind = "sett_whole" if r["method"] in ("settlement", "manual_settlement") else "whole"
-        for tid in targets:
-            if parsed.get("whole"):
-                claims_by_street.setdefault(tid, []).append(
-                    {"seg_id": s["id"], "station_id": s["station_id"], "kind": whole_kind})
-            else:
-                for iv in parsed.get("intervals", []):
-                    claims_by_street.setdefault(tid, []).append({
-                        "seg_id": s["id"], "station_id": s["station_id"], "kind": "interval",
-                        "lo": iv[0], "hi": iv[1], "parity": _iv_parity(iv),
-                        "losfx": iv[3] if len(iv) > 3 else "", "hisfx": iv[4] if len(iv) > 4 else ""})
-                for num, sfx in parsed.get("singles", []):
-                    claims_by_street.setdefault(tid, []).append({
-                        "seg_id": s["id"], "station_id": s["station_id"], "kind": "single",
-                        "num": num, "suffix": sfx})
-            # "бб" is additive: claims the street's no-number houses alongside any ranges.
-            if parsed.get("bez_broja"):
-                claims_by_street.setdefault(tid, []).append(
-                    {"seg_id": s["id"], "station_id": s["station_id"], "kind": "bez_broja"})
+        _emit_claims(claims_by_street, s["id"], s["station_id"], parsed, targets, whole_kind)
 
     # Settlement names (for added-claim labels and human-readable reasons below).
     _setts = pl.read_parquet(config.SETTLEMENTS_PARQUET)
@@ -624,23 +719,7 @@ def main() -> int:
                       "unknown_tokens": []}
             # Settlement claims yield to any street-level claim, like document ones.
             whole_kind = "sett_whole" if sett_id else "whole"
-            for tid in targets:
-                if parsed["whole"]:
-                    claims_by_street.setdefault(tid, []).append(
-                        {"seg_id": seg_id, "station_id": a["station_id"], "kind": whole_kind})
-                else:
-                    for iv in parsed["intervals"]:
-                        claims_by_street.setdefault(tid, []).append({
-                            "seg_id": seg_id, "station_id": a["station_id"], "kind": "interval",
-                            "lo": iv[0], "hi": iv[1], "parity": _iv_parity(iv),
-                            "losfx": iv[3] if len(iv) > 3 else "", "hisfx": iv[4] if len(iv) > 4 else ""})
-                    for num, sfx in parsed["singles"]:
-                        claims_by_street.setdefault(tid, []).append({
-                            "seg_id": seg_id, "station_id": a["station_id"], "kind": "single",
-                            "num": num, "suffix": sfx})
-                if parsed["bez_broja"]:
-                    claims_by_street.setdefault(tid, []).append(
-                        {"seg_id": seg_id, "station_id": a["station_id"], "kind": "bez_broja"})
+            _emit_claims(claims_by_street, seg_id, a["station_id"], parsed, targets, whole_kind)
             sname = sett_names.get(sett_id, sett_id) if sett_id else None
             added_out.append({
                 "id": seg_id, "station_id": a["station_id"], "settlement_raw": None,
@@ -657,6 +736,75 @@ def main() -> int:
             n_add += 1
         if n_add:
             print(f"  reviewer-added street claims: {n_add:,}")
+
+    # Proximity pass: a polling station covers a contiguous neighbourhood, so a street the
+    # lexical ladder left unresolved is almost always physically near the streets the
+    # station ALREADY matched — and one no other station has claimed. We anchor on the
+    # station's resolved-street centroids, search a radius adapted to its own coverage
+    # extent, and take the nearest UNCLAIMED register street that is either same-named (the
+    # 'ambiguous' case) or fuzzy-close (the 'none' case). Runs AFTER pass 1 + reviewer/added
+    # claims so `claimed` is complete; new matches feed pass 2 like any other claim. Every
+    # one is flagged 'proximity' for review. (Incremental mode loads all segments of the
+    # affected group_rep munis, and proximity is muni-scoped, so the snapshot is complete.)
+    claimed = set(claims_by_street.keys())
+    resolved_by_station: dict[int, list[tuple[float, float]]] = {}
+    for r in seg_recs:
+        if not r["street_id"] or r["old_name_dup"]:
+            continue
+        extra = r["amb_ids"] if r["method"] in ("base_parts", "settlement", "manual_settlement") else []
+        for tid in (r["street_id"], *extra):
+            c = street_centroid.get(tid)
+            if c:
+                resolved_by_station.setdefault(r["station_id"], []).append(c)
+
+    # Candidate pool per group_rep muni: unclaimed register streets that have a centroid.
+    cand_by_muni: dict[str, list[tuple[str, str, float, float]]] = defaultdict(list)
+    for sid, meta in street_meta.items():
+        if sid in claimed:
+            continue
+        c = street_centroid.get(sid)
+        if c is None:
+            continue
+        gmuni = config.group_rep(meta["municipality_id"]) if meta["municipality_id"] else None
+        cand_by_muni[gmuni].append((sid, meta["name_norm"], c[0], c[1]))
+    trees: dict[str, tuple[cKDTree, list]] = {
+        gmuni: (cKDTree(np.array([[x, y] for *_, x, y in cands])), cands)
+        for gmuni, cands in cand_by_muni.items()
+    }
+
+    newly_claimed: set[str] = set()
+    n_prox = n_disamb = 0
+    for r in seg_recs:
+        if r["method"] not in ("none", "ambiguous"):
+            continue
+        anchor = _station_anchor(resolved_by_station.get(r["station_id"], []))
+        if anchor is None:
+            continue
+        entry = trees.get(station_muni.get(r["station_id"]))
+        if entry is None:
+            continue
+        tree, cands = entry
+        near = tree.query_ball_point([anchor[0], anchor[1]], anchor[2])
+        if not near:
+            continue
+        if r["method"] == "ambiguous":
+            amb = set(r["amb_ids"])
+            pool = [cands[i] for i in near if cands[i][0] in amb and cands[i][0] not in newly_claimed]
+            hit = _nearest_unclaimed(anchor, pool, None)
+        else:
+            target = normalize_street(_PAREN_RE.sub(" ", r["street_raw"])) or normalize_street(r["street_raw"])
+            pool = [cands[i] for i in near if cands[i][0] not in newly_claimed]
+            hit = _nearest_unclaimed(anchor, pool, target)
+        if not hit:
+            continue
+        sid, score = hit
+        n_disamb += r["method"] == "ambiguous"
+        r["street_id"], r["method"], r["score"], r["amb_ids"] = sid, "proximity", score, []
+        newly_claimed.add(sid)
+        _emit_claims(claims_by_street, r["id"], r["station_id"], r["parsed"], [sid], "whole")
+        n_prox += 1
+    if n_prox:
+        print(f"  proximity matches: {n_prox:,} ({n_disamb:,} disambiguated)")
 
     # Pass 2: resolve each street; collect links + per-segment flags.
     links: list[dict] = []
@@ -714,6 +862,11 @@ def main() -> int:
         elif method == "fuzzy":
             conf = 0.5
             reasons.append("fuzzy")
+        elif method == "proximity":
+            # Resolved by geographic proximity to the station's other coverage — always
+            # surfaced so the reviewer confirms the cross-settlement / same-name pick.
+            conf = 0.5
+            reasons.append("proximity")
         elif method == "alias":
             # Hand-maintained substitution — surfaced so the reviewer confirms it once.
             conf = 0.6

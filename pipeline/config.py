@@ -61,6 +61,15 @@ STREET_FUZZY_MIN = 90       # rapidfuzz score below which a street match needs r
 STREET_FUZZY_MUNI_MIN = 93  # stricter cutoff for the muni-wide fuzzy fallback used only by
                             # stations with no home settlement (Belgrade/Niš city-munis)
 
+# Proximity pass (stage04): a polling station covers a contiguous neighbourhood, so a
+# street the lexical ladder can't resolve is almost always physically near the streets the
+# station ALREADY covers — and one no other station has claimed. The search radius is
+# adaptive: it scales with how spread-out the station's own matched addresses are.
+PROXIMITY_RADIUS_FACTOR = 2.0       # search radius = 2× the station's own coverage extent
+PROXIMITY_RADIUS_FLOOR_M = 400.0    # but never tighter than this (dense city blocks)
+PROXIMITY_RADIUS_CAP_M = 3000.0     # nor wider than this (sprawling rural stations)
+STREET_FUZZY_PROX_MIN = 90          # name-similarity cutoff for the proximity fuzzy fallback
+
 # ── Manual overrides for doc filename -> municipality (Latin register name). ──
 # Auto-matching in stage02 handles most files; add corrections here when the
 # fuzzy match is wrong. Keys are the on-disk filenames; values are the register

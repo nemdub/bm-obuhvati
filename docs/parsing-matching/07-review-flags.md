@@ -21,6 +21,7 @@ comma‑separated codes. `needs_review` is set when any *flagging* reason is pre
 | `base_parts` | 0.7 | yes |
 | `alias` | 0.6 | yes |
 | `fuzzy` | 0.5 | yes |
+| `proximity` | 0.5 | yes |
 | `muni_fallback` | 0.4 | yes |
 | `ambiguous` | 0.2 | yes |
 | unresolved (`street_id is None`) | 0.2 | yes (`street_unresolved`) |
@@ -34,6 +35,7 @@ Assembled per segment (`reasons` list):
 | `street_unresolved` | resolved to no street (and not ambiguous/manual_none) |
 | `ambiguous:S1\|S2\|…` | same name in several other settlements; lists their names |
 | `fuzzy` | method fuzzy / token‑subset |
+| `proximity` | resolved by the geographic proximity pass (nearest unclaimed same‑named / fuzzy‑close street near the station's coverage — see [05](05-street-resolution.md) §5.14) |
 | `alias` | hand‑maintained alias substitution |
 | `base_parts` | plain base name expanded to numbered part streets |
 | `settlement_claim:НАЗИВ` | whole‑settlement (village) claim |
@@ -70,10 +72,10 @@ it shows as context when the segment is flagged for another reason. All other co
 
 ## 7.5 Name discrepancy appended by the Worker
 
-For `fuzzy` / `muni_fallback` the segments API appends the actual names
-(„документски назив" → „регистарски назив") because the card title shows the **resolved
-register** name, so the discrepancy isn't otherwise visible. Example: doc „Виноградска" →
-register „Виноградарска".
+For `fuzzy` / `muni_fallback` / `alias` / `proximity` the segments API appends the actual
+names („документски назив" → „регистарски назив") because the card title shows the
+**resolved register** name, so the discrepancy isn't otherwise visible. Example: doc
+„Виноградска" → register „Виноградарска".
 
 ## 7.6 Always‑flagged sources
 
