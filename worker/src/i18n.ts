@@ -51,6 +51,8 @@ export const STRINGS = {
   settlementArea: "цело насеље",
   manualStreetSet: "Ручно изабрана улица",
   addStreet: "Додај улицу",
+  add: "Додај",
+  cancel: "Откажи",
   addedBadge: "додато",
   removeAdded: "Уклони",
   back: "Назад",

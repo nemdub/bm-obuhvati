@@ -156,6 +156,58 @@
     return r.area ? `${r.name} — ${L_.settlementArea}` : `${r.name} (${r.settlement})`;
   }
 
+  // Coverage-editing controls (whole / бб / ranges / singles) shared by the parsed-segment
+  // editor, the added-street card, and the add-street panel. Returns the wrapper element
+  // plus collect(reviewed) that reads the live values into a parsed-coverage payload.
+  function coverageEditor(parsed) {
+    parsed = parsed || {};
+    const wrap = document.createElement("div");
+    wrap.className = "coverage-editor";
+
+    // whole-street toggle
+    const wholeLbl = document.createElement("label");
+    wholeLbl.className = "whole";
+    const whole = document.createElement("input");
+    whole.type = "checkbox";
+    whole.checked = !!parsed.whole;
+    wholeLbl.append(whole, document.createTextNode(" " + L_.wholeStreet));
+
+    // bez-broja ("бб") toggle: also cover the street's no-number houses
+    const bezLbl = document.createElement("label");
+    bezLbl.className = "whole";
+    const bezBroja = document.createElement("input");
+    bezBroja.type = "checkbox";
+    bezBroja.checked = !!parsed.bez_broja;
+    bezLbl.append(bezBroja, document.createTextNode(" " + L_.bezBroja));
+
+    // intervals
+    const ivWrap = document.createElement("div");
+    ivWrap.className = "field";
+    ivWrap.innerHTML = `<span class="flabel">${L_.ranges}</span>`;
+    const ivList = document.createElement("div");
+    (parsed.intervals || []).forEach((iv) => ivList.appendChild(intervalRow(iv)));
+    const addIv = document.createElement("button");
+    addIv.className = "mini add";
+    addIv.textContent = "+ " + L_.addRange;
+    addIv.onclick = () => ivList.appendChild(intervalRow([0, 0]));
+    ivWrap.append(ivList, addIv);
+
+    // singles
+    const sgWrap = document.createElement("div");
+    sgWrap.className = "field";
+    sgWrap.innerHTML = `<span class="flabel">${L_.singles}</span>`;
+    const sgList = document.createElement("div");
+    (parsed.singles || []).forEach((s) => sgList.appendChild(singleRow(s)));
+    const addSg = document.createElement("button");
+    addSg.className = "mini add";
+    addSg.textContent = "+ " + L_.addSingle;
+    addSg.onclick = () => sgList.appendChild(singleRow([0, ""]));
+    sgWrap.append(sgList, addSg);
+
+    wrap.append(wholeLbl, bezLbl, ivWrap, sgWrap);
+    return { el: wrap, collect: (reviewed) => collect(whole, bezBroja, ivList, sgList, reviewed) };
+  }
+
   // Reviewer-added street claim card: street name + numbers, with a remove button only
   // (the document never mentions this street; the claim itself is the human statement).
   function renderAddedSegment(seg) {
@@ -168,13 +220,18 @@
     head.onclick = () => { highlightSeg = highlightSeg === seg.id ? null : seg.id; focusSegment(highlightSeg); };
     const body = document.createElement("div");
     body.className = "seg-body";
-    const desc = document.createElement("p");
-    desc.className = "amend-note";
-    desc.textContent = seg.parsed.whole ? L_.wholeStreet :
-      JSON.stringify({ [L_.ranges]: seg.parsed.intervals, [L_.singles]: seg.parsed.singles });
-    body.appendChild(desc);
+    const editor = coverageEditor(seg.parsed);
+    body.appendChild(editor.el);
     const actions = document.createElement("div");
     actions.className = "seg-actions";
+    actions.appendChild(mkBtn(L_.save, "btn primary", async () => {
+      await fetch(`/api/added/${seg.added_id}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editor.collect(false)),
+      });
+      flash(actions, L_.saved);
+      await reload();
+    }));
     actions.appendChild(mkBtn(L_.removeAdded, "btn", async () => {
       await fetch(`/api/added/${seg.added_id}`, { method: "DELETE" });
       await reload();
@@ -184,7 +241,8 @@
     return card;
   }
 
-  // "Add street" panel: search the register, add a whole-street claim to this station.
+  // "Add street" panel: search the register, then define the coverage (whole street, бб,
+  // number ranges, singles — same controls as a parsed segment) before adding the claim.
   function renderAddPanel() {
     const wrap = document.createElement("div");
     wrap.className = "seg add-panel";
@@ -201,9 +259,44 @@
     input.className = "street-search";
     const list = document.createElement("div");
     list.className = "street-results";
+    // Coverage form, hidden until a street is picked. Rebuilt per selection so each pick
+    // starts from a clean whole-street default.
+    const form = document.createElement("div");
+    form.className = "add-coverage";
+    form.style.display = "none";
+
+    const reset = () => {
+      input.value = "";
+      list.innerHTML = "";
+      form.style.display = "none";
+      form.innerHTML = "";
+    };
+    const selectStreet = (r) => {
+      list.innerHTML = "";
+      input.value = streetItemLabel(r);
+      form.innerHTML = "";
+      const editor = coverageEditor({ whole: true });
+      const actions = document.createElement("div");
+      actions.className = "seg-actions";
+      actions.append(
+        mkBtn(L_.add, "btn primary", async () => {
+          await fetch(api("/segments"), {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...editor.collect(false), street_id: r.id }),
+          });
+          reset();
+          await reload();
+        }),
+        mkBtn(L_.cancel, "btn", reset),
+      );
+      form.append(editor.el, actions);
+      form.style.display = "block";
+    };
+
     let timer = null;
     input.addEventListener("input", () => {
       clearTimeout(timer);
+      form.style.display = "none";
       timer = setTimeout(async () => {
         const q = input.value.trim();
         if (q.length < 2) { list.innerHTML = ""; return; }
@@ -213,18 +306,12 @@
           const item = document.createElement("div");
           item.className = "street-item" + (r.area ? " area" : "");
           item.textContent = streetItemLabel(r);
-          item.onclick = async () => {
-            await fetch(api("/segments"), {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ street_id: r.id, whole: true }),
-            });
-            await reload();
-          };
+          item.onclick = () => selectStreet(r);
           list.appendChild(item);
         });
       }, 250);
     });
-    body.append(input, list);
+    body.append(input, list, form);
     wrap.append(head, body);
     return wrap;
   }
@@ -319,59 +406,15 @@
     sp.append(spBtn, spBox);
     body.appendChild(sp);
 
-    // whole-street toggle
-    const wholeLbl = document.createElement("label");
-    wholeLbl.className = "whole";
-    const whole = document.createElement("input");
-    whole.type = "checkbox";
-    whole.checked = !!seg.parsed.whole;
-    wholeLbl.appendChild(whole);
-    wholeLbl.appendChild(document.createTextNode(" " + L_.wholeStreet));
-    body.appendChild(wholeLbl);
-
-    // bez-broja ("бб") toggle: also cover the street's no-number houses
-    const bezLbl = document.createElement("label");
-    bezLbl.className = "whole";
-    const bezBroja = document.createElement("input");
-    bezBroja.type = "checkbox";
-    bezBroja.checked = !!seg.parsed.bez_broja;
-    bezLbl.appendChild(bezBroja);
-    bezLbl.appendChild(document.createTextNode(" " + L_.bezBroja));
-    body.appendChild(bezLbl);
-
-    // intervals
-    const ivWrap = document.createElement("div");
-    ivWrap.className = "field";
-    ivWrap.innerHTML = `<span class="flabel">${L_.ranges}</span>`;
-    const ivList = document.createElement("div");
-    (seg.parsed.intervals || []).forEach((iv) => ivList.appendChild(intervalRow(iv)));
-    const addIv = document.createElement("button");
-    addIv.className = "mini add";
-    addIv.textContent = "+ " + L_.addRange;
-    addIv.onclick = () => ivList.appendChild(intervalRow([0, 0]));
-    ivWrap.appendChild(ivList);
-    ivWrap.appendChild(addIv);
-    body.appendChild(ivWrap);
-
-    // singles
-    const sgWrap = document.createElement("div");
-    sgWrap.className = "field";
-    sgWrap.innerHTML = `<span class="flabel">${L_.singles}</span>`;
-    const sgList = document.createElement("div");
-    (seg.parsed.singles || []).forEach((s) => sgList.appendChild(singleRow(s)));
-    const addSg = document.createElement("button");
-    addSg.className = "mini add";
-    addSg.textContent = "+ " + L_.addSingle;
-    addSg.onclick = () => sgList.appendChild(singleRow([0, ""]));
-    sgWrap.appendChild(sgList);
-    sgWrap.appendChild(addSg);
-    body.appendChild(sgWrap);
+    // coverage controls (whole / бб / ranges / singles)
+    const editor = coverageEditor(seg.parsed);
+    body.appendChild(editor.el);
 
     // actions
     const actions = document.createElement("div");
     actions.className = "seg-actions";
     const payload = (reviewedFlag) => JSON.stringify({
-      ...collect(whole, bezBroja, ivList, sgList, reviewedFlag),
+      ...editor.collect(reviewedFlag),
       street_id: chosenStreet ?? seg.manual_street_id ?? null, // keep prior manual street
     });
     const save = mkBtn(L_.save, "btn primary", async () => {
@@ -395,7 +438,7 @@
       actions.appendChild(mkBtn(L_.doesNotExist, "btn", async () => {
         await fetch(`/api/segments/${seg.id}`, {
           method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...collect(whole, bezBroja, ivList, sgList, true), street_id: "none" }),
+          body: JSON.stringify({ ...editor.collect(true), street_id: "none" }),
         });
         await reload();
       }));

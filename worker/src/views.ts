@@ -220,7 +220,8 @@ function labelBundle(script: Script) {
     reviewReason: t("reviewReason"),
     changeStreet: t("changeStreet"), searchStreet: t("searchStreet"), manualStreetSet: t("manualStreetSet"),
     settlementArea: t("settlementArea"),
-    addStreet: t("addStreet"), addedBadge: t("addedBadge"), removeAdded: t("removeAdded"),
+    addStreet: t("addStreet"), add: t("add"), cancel: t("cancel"),
+    addedBadge: t("addedBadge"), removeAdded: t("removeAdded"),
     polygon: t("polygon"), noPolygon: t("noPolygon"), stale: t("stale"), recomputeQueued: t("recomputeQueued"),
     source: t("source"), base: t("base"), amendment: t("amendment"),
   };

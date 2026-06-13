@@ -168,6 +168,27 @@ app.post("/api/s/:id/segments", async (c) => {
   return c.json({ ok: true });
 });
 
+// Edit an existing reviewer street claim (refine its coverage after adding).
+app.put("/api/added/:addedId", async (c) => {
+  const aid = Number(c.req.param("addedId"));
+  const body = await c.req.json<{
+    whole?: boolean; bez_broja?: boolean; intervals?: unknown[]; singles?: unknown[];
+  }>();
+  const row = await c.env.DB.prepare("SELECT station_id FROM station_added_segments WHERE id = ?")
+    .bind(aid).first<{ station_id: number }>();
+  if (!row) return c.notFound();
+  const manual = JSON.stringify({
+    intervals: body.intervals ?? [],
+    singles: body.singles ?? [],
+    whole: body.whole ?? false,
+    bez_broja: !!body.bez_broja,
+  });
+  await c.env.DB.prepare("UPDATE station_added_segments SET manual_json = ? WHERE id = ?")
+    .bind(manual, aid).run();
+  await markDirty(c.env.DB, row.station_id);
+  return c.json({ ok: true });
+});
+
 app.delete("/api/added/:addedId", async (c) => {
   const aid = Number(c.req.param("addedId"));
   const row = await c.env.DB.prepare("SELECT station_id FROM station_added_segments WHERE id = ?")
