@@ -10,10 +10,11 @@
 # Safe to re-run any time (idempotent). Stages 01-03 are NOT run (use them only when source
 # data or the parser changed).
 #
-# The byte-heavy polygons now live in R2 (per-muni GeoJSON blobs), and the write-only
-# station_address_links table is no longer shipped, so the D1 derived dump is small text
-# (segments + stations + amendments). A plain full reload is fast — there is no longer a
-# `--only-dirty` reconcile path; it existed only to avoid re-shipping ~1.9M link rows.
+# The byte-heavy polygons now live in R2 (per-muni GeoJSON blobs, uploaded only when their
+# content changed), and the write-only station_address_links table is no longer shipped. The
+# D1 derived dump is small text (segments + stations + amendments) and is shipped as a per-row
+# delta (UPSERT changed rows, DELETE vanished ones) vs. the last successful import — so a
+# recompute that re-matched a few stations writes only those rows, not all ~76k every run.
 #
 # Usage:
 #   ./recompute.sh             # recompute everything; full reload of the derived dump
@@ -62,8 +63,16 @@ if [ "$IMPORT" = 1 ]; then
   fi
 
   if [ "$IMPORT_OK" = 1 ]; then
-    # Import succeeded (or nothing to write) -> clear dirty flags race-safely (a station
-    # re-edited during the run keeps its flag, so its edit isn't lost — next run catches it).
+    # Import succeeded (or nothing to write) -> advance the derived-state manifest so the next
+    # run diffs against what D1 now holds. Done only here, after a clean import, so a failed
+    # import leaves the old manifest and the next run re-emits the same delta (idempotent).
+    for nf in "$DIR"/artifacts/derived_state/*.tsv.new; do
+      [ -e "$nf" ] || continue
+      mv "$nf" "${nf%.new}"
+    done
+
+    # Clear dirty flags race-safely (a station re-edited during the run keeps its flag, so
+    # its edit isn't lost — next run catches it).
     N="$("$PY" "$DIR/dirty_scope.py" clear-sql)"
     if [ "$N" -gt 0 ] 2>/dev/null; then
       echo "-- clearing dirty flag for $N station(s)"
@@ -74,8 +83,9 @@ if [ "$IMPORT" = 1 ]; then
       echo "-- no dirty flags to clear"
     fi
   else
-    echo "!! import failed -- NOT clearing dirty flags. The derived dump is delete+insert," >&2
-    echo "   so just re-run ./recompute.sh." >&2
+    echo "!! import failed -- NOT clearing dirty flags and NOT advancing the derived-state" >&2
+    echo "   manifest, so the next run re-emits the same delta (UPSERT/DELETE is idempotent)." >&2
+    echo "   Just re-run ./recompute.sh." >&2
     exit 1
   fi
 fi

@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -70,15 +71,19 @@ TABLES: dict[str, tuple[Path, list[str]]] = {
 #   REFERENCE — insert-only, loaded once after the migration; never deleted because
 #               addresses reference them.
 #   addresses — insert-only, the one-time heavy load.
-#   DERIVED   — re-runnable each pipeline pass: DELETE child->parent, INSERT parent->child.
+#   DERIVED   — re-runnable each pipeline pass. Shipped as a DELTA (UPSERT changed rows,
+#               DELETE vanished ones) vs. the last successful import; bootstraps to a full
+#               DELETE child->parent + INSERT parent->child when no manifest exists. See
+#               dump_derived.
 REFERENCE = ["municipalities", "settlements", "streets"]
 # Two derived tables are built LOCALLY but deliberately NOT shipped to D1:
 #   `station_address_links` (~1.9M rows) — stage05 derives Voronoi polygons from it, but the
 #       Worker never queries it (coverage points are computed live from `addresses`).
 #   `polygons` (~7.4k rows / ~70MB of GeoJSON) — served from R2 instead (per-municipality
 #       blobs, see write_r2_blobs); the byte-heavy geometry has no business in D1.
-# What remains in the derived D1 dump is small text (segments + stations + amendments), so a
-# plain full reload is fast and robust — no chunked-link import, no `--only-dirty` reconcile.
+# What remains in the derived D1 dump is small text (segments + stations + amendments), and
+# is shipped as a per-row delta (dump_derived) so a recompute that re-matched a few stations
+# writes only those rows instead of re-shipping all ~76k every run.
 # Both tables are dropped from D1 by migration 0010; build_sqlite tolerates their absence.
 DERIVED_INSERT_ORDER = [
     "polling_stations", "coverage_segments", "amendments",
@@ -99,10 +104,13 @@ def sql_literal(v: object) -> str:
     return f"'{s}'"
 
 
-def write_inserts(f, df: pl.DataFrame, table: str, cols: list[str], verb: str = "INSERT") -> int:
+def write_inserts(f, df: pl.DataFrame, table: str, cols: list[str], verb: str = "INSERT",
+                  on_conflict: str = "") -> int:
     """Batched multi-row INSERTs, flushed by row count OR byte budget (whichever first),
     so wide rows (polygons/segments) don't blow the statement-size cap. ``verb`` lets the
-    reference group use ``INSERT OR IGNORE`` (idempotent, additive on the live DB)."""
+    reference group use ``INSERT OR IGNORE`` (idempotent, additive on the live DB).
+    ``on_conflict`` (e.g. an ``ON CONFLICT(id) DO UPDATE SET ...`` clause) is appended to each
+    statement so the delta import can UPSERT changed rows in place."""
     rows = df.select(cols).rows()
     col_list = ", ".join(cols)
     header = f"{verb} INTO {table} ({col_list}) VALUES\n"
@@ -112,7 +120,7 @@ def write_inserts(f, df: pl.DataFrame, table: str, cols: list[str], verb: str = 
     def flush() -> None:
         nonlocal buf, size
         if buf:
-            f.write(header + ",\n".join(buf) + ";\n")
+            f.write(header + ",\n".join(buf) + on_conflict + ";\n")
             buf = []
             size = 0
 
@@ -137,6 +145,97 @@ def dump_group(present: dict[str, pl.DataFrame], insert_order: list[str],
             if table in present:
                 counts[table] = write_inserts(f, present[table], table, TABLES[table][1], verb)
     return counts
+
+
+# --- Incremental derived import: delta vs. the last-shipped snapshot ---------------------
+# The derived tables are re-derived in full every recompute, but a recompute only re-matches
+# the handful of stations whose reviewer overrides changed — so almost every row is
+# byte-identical to what D1 already holds. Rather than DELETE+reINSERT all ~76k rows each
+# run, hash every row and diff against a local manifest of what was last *successfully*
+# shipped (artifacts/derived_state/<table>.tsv, advanced by recompute.sh only after the D1
+# import succeeds). The dump then carries only:
+#   * UPSERTs for new/changed rows  (INSERT ... ON CONFLICT(id) DO UPDATE SET ...)
+#   * DELETEs for rows that vanished since the last ship
+# FK-ordered exactly like the full reload (delete child->parent, upsert parent->child), so a
+# plain count-split by d1_apply.sh keeps constraints valid across chunk boundaries.
+#
+# Bootstrap: if any manifest is missing we fall back to the full DELETE+reINSERT (which also
+# wipes any rows D1 holds that the new build dropped) and seed the manifests, so the first
+# run is exactly today's behaviour. `rm -r artifacts/derived_state/` forces a clean reload.
+
+
+def _row_sig(row: tuple) -> str:
+    """Order-stable content hash of one row, over the exact columns shipped to D1."""
+    h = hashlib.blake2b(digest_size=8)
+    for v in row:
+        h.update(repr(v).encode("utf-8"))
+        h.update(b"\x1f")
+    return h.hexdigest()
+
+
+def _row_sigs(df: pl.DataFrame, cols: list[str]) -> dict[str, str]:
+    """id (as str) -> content hash, keyed by the PK column (cols[0])."""
+    return {str(r[0]): _row_sig(r) for r in df.select(cols).rows()}
+
+
+def _read_state(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line:
+            k, _, v = line.partition("\t")
+            out[k] = v
+    return out
+
+
+def _write_state(path: Path, sigs: dict[str, str]) -> None:
+    path.write_text("".join(f"{k}\t{v}\n" for k, v in sigs.items()), encoding="utf-8")
+
+
+def _upsert_suffix(cols: list[str]) -> str:
+    sets = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "id")
+    return f"\nON CONFLICT(id) DO UPDATE SET {sets}"
+
+
+def dump_derived(present: dict[str, pl.DataFrame], out: Path,
+                 state_dir: Path) -> tuple[dict[str, int], int, str]:
+    """Write import_derived.sql as a DELTA vs the last-shipped manifest when possible, else a
+    full DELETE+reINSERT (bootstrap). Always (re)writes pending manifests to <table>.tsv.new;
+    recompute.sh promotes them to <table>.tsv only after a clean D1 import. Returns
+    (changed/inserted row count per table, total removed rows, mode)."""
+    derived = {t: present[t] for t in DERIVED_INSERT_ORDER if t in present}
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    sigs = {t: _row_sigs(derived[t], TABLES[t][1]) for t in derived}
+    for t, s in sigs.items():
+        _write_state(state_dir / f"{t}.tsv.new", s)
+
+    if not all((state_dir / f"{t}.tsv").exists() for t in derived):
+        counts = dump_group(derived, DERIVED_INSERT_ORDER, DERIVED_DELETE_ORDER, out)
+        return counts, 0, "full reload"
+
+    # Delta: changed = new-or-modified ids (upsert), removed = ids gone since last ship (delete).
+    changed: dict[str, list[int]] = {}
+    removed: dict[str, list[str]] = {}
+    for t in derived:
+        old = _read_state(state_dir / f"{t}.tsv")
+        new = sigs[t]
+        changed[t] = [int(k) for k, v in new.items() if old.get(k) != v]
+        removed[t] = [k for k in old if k not in new]
+
+    counts = {t: 0 for t in derived}
+    with out.open("w", encoding="utf-8") as f:
+        for t in DERIVED_DELETE_ORDER:                       # children -> parents
+            for chunk in _chunks(removed.get(t, []), 500):
+                f.write(f"DELETE FROM {t} WHERE id IN ({', '.join(chunk)});\n")
+        for t in DERIVED_INSERT_ORDER:                       # parents -> children
+            if not changed.get(t):
+                continue
+            cols = TABLES[t][1]
+            df = derived[t].filter(pl.col("id").is_in(changed[t]))
+            counts[t] = write_inserts(f, df, t, cols, on_conflict=_upsert_suffix(cols))
+    return counts, sum(len(v) for v in removed.values()), "delta"
 
 
 # Incremental (--municipalities) import: only the derived tables a coverage edit can
@@ -392,13 +491,16 @@ def main() -> int:
         counts = dump_group({"addresses": present["addresses"]}, ["addresses"], [], path)
         print(f"  addresses: {counts['addresses']:,} rows -> {path}")
 
-    # Derived data (re-runnable: delete child->parent, insert parent->child).
-    derived_present = {t: present[t] for t in DERIVED_INSERT_ORDER if t in present}
-    if derived_present:
+    # Derived data: ship only the delta vs. the last successful import (UPSERT changed rows,
+    # DELETE vanished ones); a missing manifest bootstraps a full reload. See dump_derived.
+    if any(t in present for t in DERIVED_INSERT_ORDER):
         path = config.ARTIFACTS_DIR / "import_derived.sql"
-        counts = dump_group(derived_present, DERIVED_INSERT_ORDER, DERIVED_DELETE_ORDER, path)
+        state_dir = config.ARTIFACTS_DIR / "derived_state"
+        counts, n_removed, mode = dump_derived(present, path, state_dir)
         for t, n in counts.items():
-            print(f"  {t}: {n:,} rows")
+            print(f"  {t}: {n:,} rows ({mode})")
+        if n_removed:
+            print(f"  + {n_removed:,} removed row(s) deleted")
         print(f"  -> {path}")
 
     # Municipality boundaries (re-runnable, rarely changes -> own file).
