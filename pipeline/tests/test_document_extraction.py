@@ -131,6 +131,46 @@ class TestRowsFromDoc:
         rows = S2.rows_from_doc(txt)
         assert rows == [(None, 1, "ОШ Вук", "Ул. Прва 1", "Прва 1-10 Друга 2-8")]
 
+    def test_quoted_name_continuation_merged(self):
+        # A venue name wrapping onto a fully-quoted second line ('ДЕЧИЈИ ВРТИЋ' /
+        # '``ДУШКО РАДОВИЋ``') merges into the name — NOT read as the address (which would
+        # shove the real address into the coverage and mis-claim the whole town).
+        txt = "\n".join([
+            HEADER, "1",
+            "ДЕЧИЈИ ВРТИЋ", "``ДУШКО РАДОВИЋ``",
+            "ПОЖАРЕВАЦ, ПОЖАРЕВАЧКИ ОДРЕД ББ",
+            "Алексе Галибарде, Боре Станковића",
+        ])
+        rows = S2.rows_from_doc(txt)
+        assert rows == [(
+            None, 1,
+            "ДЕЧИЈИ ВРТИЋ ``ДУШКО РАДОВИЋ``",
+            "ПОЖАРЕВАЦ, ПОЖАРЕВАЧКИ ОДРЕД ББ",
+            "Алексе Галибарде, Боре Станковића",
+        )]
+
+    def test_quoted_address_not_merged(self):
+        # A line that STARTS with a quote but carries address text after the closing quote
+        # ('"КРАЉЕВИЦА" ББ, ЗАЈЕЧАР') is the address, not a name fragment — left in place.
+        txt = "\n".join([
+            HEADER, "1",
+            'ВРТИЋ "ЂУРЂЕВАК"', '"КРАЉЕВИЦА" ББ, ЗАЈЕЧАР',
+            "Љубе Нешића, Краљевица",
+        ])
+        rows = S2.rows_from_doc(txt)
+        assert rows[0][2:] == ('ВРТИЋ "ЂУРЂЕВАК"', '"КРАЉЕВИЦА" ББ, ЗАЈЕЧАР', "Љубе Нешића, Краљевица")
+
+    def test_multiline_coverage_not_treated_as_name(self):
+        # A NON-quoted line after the name is the address; remaining lines are coverage —
+        # a multi-line coverage row must stay correct (name=1 line, addr=1 line).
+        txt = "\n".join([
+            HEADER, "1",
+            "ОСНОВНА ШКОЛА", "ЛУЧИЦА",
+            "15. октобра 37-265", "2-58, Сеоско сокаче",
+        ])
+        rows = S2.rows_from_doc(txt)
+        assert rows[0][2:] == ("ОСНОВНА ШКОЛА", "ЛУЧИЦА", "15. октобра 37-265 2-58, Сеоско сокаче")
+
 
 class TestRowsFromDocTriplets:
     def test_groups_into_triplets(self):

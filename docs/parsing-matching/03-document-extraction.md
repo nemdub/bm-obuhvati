@@ -8,7 +8,7 @@ macOS `textutil` to convert `.doc` → txt (linearized) and `.docx`/table `.doc`
 (cells preserved).
 
 > Test target: `rows_from_docx`, `rows_from_doc`, `rows_from_doc_triplets`,
-> `_dedupe_dual_script`, `clean_filename_to_candidate`, `deaccent`, `build_muni_matcher`,
+> `_dedupe_dual_script`, `_is_quoted_fragment`, `clean_filename_to_candidate`, `deaccent`, `build_muni_matcher`,
 > `_header_start`, the file classification regexes, and the station‑id formula.
 
 ## 3.1 File classification
@@ -103,6 +103,34 @@ cells still aligns — e.g. a Sjenica station whose name isn't restated (5 lines
 threshold — so nothing collapses. Verified: dual‑script handling brought Tutin/Prijepolje/
 Sjenica to their declared counts (61/66/68) with correct address & coverage columns, and no
 single‑script doc changed.
+
+### Multi‑line venue names (`_is_quoted_fragment`)
+
+A venue's name can wrap onto a **second line** — typically a quoted proper name on its own
+line:
+
+```
+ДЕЧИЈИ ВРТИЋ                              name, line 1
+ ``ДУШКО РАДОВИЋ``                        name, line 2  (quoted)
+ПОЖАРЕВАЦ, ПОЖАРЕВАЧКИ ПАРТИЗАНСКИ ОДРЕД  ББ   address
+Алексе Галибарде, Боре Станковића, …     coverage
+```
+
+Naively, `flush()` would read the quoted line as the **address** and shove the real address
+(`ПОЖАРЕВАЦ, … ББ`) onto the front of `raw_coverage_text` — where it then parses as a
+**whole‑settlement claim** of the town (every Пожаревац street), which both mis‑covers the
+station and triggered a Worker 500 (see [08](08-worker-live-preview.md) §8.4).
+
+**Rule:** while splitting `cur`, merge a leading **fully‑quoted** line into the name
+(`_is_quoted_fragment`: the line both starts and ends with a quote glyph — `` ` ``, `"`, `„`,
+`“`, `”`, `«`, `»`), as long as the address + coverage lines still remain after it. A line that
+merely *starts* with a quote but carries address text after the closing quote
+(`"КРАЉЕВИЦА" ББ, ЗАЈЕЧАР`) is **not** a fragment and stays the address.
+
+Verified: 3 stations corrected nationwide (Пожаревац #50/#51 `ДЕЧИЈИ ВРТИЋ ``ДУШКО РАДОВИЋ```,
+Пирот `БИВША ПРОДАВНИЦА „4 АСА“`); all other 8,189 stations unchanged, including the
+quoted‑building‑address control (`ВРТИЋ "ЂУРЂЕВАК"`) and multi‑line *coverage* rows (which the
+existing `coverage = remaining lines joined` rule already handles).
 
 ## 3.5 Sectioned city docs (`rows_from_doc` with `sections`)
 

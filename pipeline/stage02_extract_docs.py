@@ -144,6 +144,18 @@ def _dedupe_dual_script(cur: list[str]) -> list[str]:
 
 SECTION_RE = re.compile(r"ГРАДСКА\s+ОПШТИНА\s+(.+)", re.IGNORECASE)
 
+# Quote glyphs a venue's proper name is wrapped in (`` ``…`` ``, "…", „…“, «…»).
+_QUOTE_CHARS = "`\"„“”«»"
+
+
+def _is_quoted_fragment(s: str) -> bool:
+    """A line that is wholly a quoted proper name ('``ДУШКО РАДОВИЋ``', '„4 АСА“') — a venue
+    name that wrapped onto its own line, not an address. A line that merely STARTS with a
+    quote but carries address text after the closing quote ('"КРАЉЕВИЦА" ББ, ЗАЈЕЧАР') is
+    NOT a fragment and stays the address."""
+    s = s.strip()
+    return len(s) >= 2 and s[0] in _QUOTE_CHARS and s[-1] in _QUOTE_CHARS
+
 
 def rows_from_doc(txt: str, sections: dict[str, str] | None = None
                   ) -> list[tuple[str | None, int, str, str, str]]:
@@ -175,9 +187,17 @@ def rows_from_doc(txt: str, sections: dict[str, str] | None = None
         if cur is None:
             return
         lines = _dedupe_dual_script(cur)
-        name = lines[0] if len(lines) >= 1 else ""
-        address = lines[1] if len(lines) >= 2 else ""
-        coverage = " ".join(lines[2:]).strip()
+        # An institution name can wrap onto a second line — typically a quoted proper name
+        # ('ДЕЧИЈИ ВРТИЋ' / '``ДУШКО РАДОВИЋ``', 'БИВША ПРОДАВНИЦА' / '„4 АСА“'). Merge a
+        # fully-quoted continuation line into the name so it isn't mistaken for the address
+        # (which would otherwise shove the real address into the coverage text). Only while
+        # at least the address + coverage lines remain after it.
+        n = 1
+        while n < len(lines) - 2 and _is_quoted_fragment(lines[n]):
+            n += 1
+        name = " ".join(lines[:n]).strip()
+        address = lines[n] if len(lines) > n else ""
+        coverage = " ".join(lines[n + 1:]).strip()
         out.append((cur_section, cur_num, name, address, coverage))
 
     for ln in lines[start:]:
