@@ -333,6 +333,16 @@ def main() -> int:
             else:
                 merged = clipped
                 n_clipped += 1
+        # Despike: the per-cell octagons touch through pinch points, so unary_union (and the
+        # clip intersection) thread needle-thin zero-width slits into the boundary that render
+        # as spikes shooting toward the centre. A small morphological close (dilate then erode)
+        # heals them and repairs validity; the simplify pass below removes the rounding so the
+        # result has fewer vertices, not more. Negligible area change (~0.05%).
+        deflated = merged.buffer(config.POLYGON_DESPIKE_M, quad_segs=2).buffer(
+            -config.POLYGON_DESPIKE_M, quad_segs=2
+        )
+        if not deflated.is_empty:
+            merged = deflated
         area = merged.area  # m^2 (UTM)
         # Adaptive simplification: whole-village polygons can exceed the D1 statement
         # budget (~50KB); escalate tolerance until the GeoJSON fits.

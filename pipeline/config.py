@@ -57,6 +57,13 @@ SIMPLIFY_TOL_M = 5.0        # polygon simplification tolerance (meters)
 # Large enough to bridge addresses across a street / along a block, small enough to trim
 # parks and edges.
 POLYGON_CLIP_BUFFER_M = 180.0
+# Morphological-close radius applied to each merged station polygon before simplification.
+# The per-cell octagons touch through pinch points, so unary_union threads needle-thin
+# zero-width slits into the boundary that render as spikes shooting toward the centre
+# ("intestines"). A small dilate-then-erode heals them; the simplify pass below removes the
+# buffer's rounding, so the net polygon has FEWER vertices and is valid. Keep well under the
+# smallest real coverage feature so it never bridges distinct parts or fills real concavities.
+POLYGON_DESPIKE_M = 3.0
 BOUNDARY_SIMPLIFY_TOL_M = 20.0  # simplification of municipality boundaries for the UI overlay
 
 # ── Matching tuning ─────────────────────────────────────────────────────────
