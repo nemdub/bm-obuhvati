@@ -420,6 +420,12 @@ _DASH_SPACE = re.compile(r"(\d)\s*[-–]\s*(\d)")
 # Ordinal glued to the following word ("7.јула", "1.маја", "10.октобра") — split so "7." is
 # seen as an ordinal (street-name part) instead of a house number "7" + junk.
 _ORDINAL_GLUE = re.compile(r"(\d+\.)([А-Яа-яЂ-џA-Za-z])")
+# Prose list-introducer: some docs (Беочин) prefix the street list with a sentence ending
+# "...у улици:" / "...у улицама:" ("voters residing in MZ … in the street(s):"). Strip up to
+# and including it so the sentence isn't glued onto the first street. Nationwide this
+# colon-terminated marker occurs only in this preamble; the structured 'Улица:' label is
+# never preceded by "у ", so structured docs are untouched.
+_LIST_PREAMBLE_RE = re.compile(r"^.*?\bу\s+улиц(?:и|ама)\s*:\s*", re.IGNORECASE | re.DOTALL)
 
 
 def parse_coverage(text: str, is_street=None) -> list[Segment]:
@@ -430,6 +436,7 @@ def parse_coverage(text: str, is_street=None) -> list[Segment]:
     splitting them on the connector (see `_merge_street_connectors`)."""
     if not text or not text.strip():
         return []
+    text = _LIST_PREAMBLE_RE.sub("", text)
     text = _DEO_GLUE.sub(r"\1 \2", text)
     text = _DASH_SPACE.sub(r"\1-\2", text)
     text = _ORDINAL_GLUE.sub(r"\1 \2", text)

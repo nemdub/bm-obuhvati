@@ -376,3 +376,24 @@ class TestTextPreprocessing:
         segs = parse_coverage("7.јула 1-10")
         s = segs[0]
         assert s.street_raw == "7. јула" and s.intervals == [[1, 10, "all"]]
+
+    @pytest.mark.parametrize("intro", ["у улицама:", "у улици:"])
+    def test_list_preamble_stripped(self, intro):
+        # A prose preamble ending "у улиц(и|ама):" is dropped so it doesn't glue onto the
+        # first street (Беочин: "...у МЗ Беочин град у улицама: <streets>").
+        segs = parse_coverage(f"На овом гласачком месту ... у МЗ Беочин град {intro} Дунавска, Његошева")
+        assert [s.street_raw for s in segs] == ["Дунавска", "Његошева"]
+
+    def test_preamble_prevents_false_structured_detection(self):
+        # The preamble's "улицама" matches the structured `Улица:` label; with a `број` token
+        # in the list the whole coverage was mis-parsed as one structured whole-street blob.
+        # Stripping the preamble first keeps it compact -> per-street segments.
+        segs = parse_coverage(
+            "На овом гласачком месту ... у улицама: Светосавска од броја 6-14, Дунавска")
+        assert [s.street_raw for s in segs] == ["Светосавска", "Дунавска"]
+        assert segs[0].intervals == [[6, 14, "even"]]
+
+    def test_no_preamble_untouched(self):
+        # Normal coverage (no preamble) is unchanged, incl. a street named "... улица".
+        segs = parse_coverage("Цара Лазара 1-23, Сутјеска улица")
+        assert [s.street_raw for s in segs] == ["Цара Лазара", "Сутјеска улица"]

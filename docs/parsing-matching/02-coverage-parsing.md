@@ -386,15 +386,26 @@ positional‑id reason as the `и` merge.
 
 ## 2.15 Text preprocessing in `parse_coverage`
 
-Before dialect detection, `parse_coverage` runs three regex fix‑ups on the raw text so the
-tokenizer sees clean tokens:
+Before dialect detection, `parse_coverage` runs these regex fix‑ups on the raw text so the
+tokenizer sees clean tokens (the preamble strip runs **first**, so its `улицама` can't skew
+dialect detection):
 
 | Regex | Fix | Example |
 |-------|-----|---------|
+| `_LIST_PREAMBLE_RE` | drop a prose list‑introducer ending `у улици:` / `у улицама:` | `…у МЗ Беочин град у улицама: 1.маја, …` → `1.маја, …` |
 | `_DEO_GLUE` | split `део` glued to a number | `део13` → `део 13` (see 2.7) |
 | `_DASH_SPACE` | collapse spaces around a range dash, **digits only** | `2- 100`, `2 - 100` → `2-100` |
 | `_ORDINAL_GLUE` | split an ordinal glued to the next word | `7.јула` → `7. јула` |
 
+- **`_LIST_PREAMBLE_RE`** strips up to and including a `…у улиц(и|ама):` marker. Some docs
+  (Беочин) prefix the list with a sentence ("voters residing in MZ … in the street(s):") that
+  the compact parser would otherwise **glue onto the first street**. Worse, the preamble's
+  `улицама` matches the structured `Улица:` label, so a station whose list also contains a
+  `број` token (e.g. `Светосавска од броја 6-14`) was mis‑detected as **structured** and its
+  **entire** coverage collapsed into one whole‑street segment — stripping the preamble fixes
+  both. The colon‑terminated marker occurs **only** in this preamble nationwide (16 Беočин
+  stations); the structured `Улица:` label is never preceded by `у `, so structured docs are
+  untouched.
 - **`_DASH_SPACE`** only fires **between digits**, so block tags (`С-1`) and suffix tails are
   untouched. `Прва 2 - 100` → interval `[2, 100, 'even']` (would otherwise tokenize as `2`,
   `-`, `100`).
