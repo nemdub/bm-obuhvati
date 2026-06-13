@@ -1,7 +1,7 @@
 #!/bin/sh
 # Review -> recompute loop, in one command:
 #   1. fetch reviewer overrides + the dirty-station snapshot from remote D1
-#   2. stage04 (match, honoring overrides) -> stage05 (Voronoi)
+#   2. stage04 (match, honoring overrides) -> stage05 (Voronoi), scoped to the dirty munis
 #   3. stage06 build the (small) derived dump + per-municipality R2 polygon blobs
 #   4. upload polygon blobs to R2, then write the derived rows to remote D1
 #   5. clear the `dirty` flag for the stations that were just synced
@@ -10,6 +10,13 @@
 # Safe to re-run any time (idempotent). Stages 01-03 are NOT run (use them only when source
 # data or the parser changed).
 #
+# By default the recompute is INCREMENTAL: only the municipalities a reviewer actually edited
+# (the dirty snapshot, via dirty_scope.py) are re-matched and re-tessellated. stage05 still
+# loads the full point set for halo constraints, so the recomputed polygons are byte-identical
+# to a full run — only the unchanged localities are skipped (the slow Voronoi pass). Pass
+# --full to recompute every municipality (e.g. after a parser/matching change that touched all
+# stations without setting their dirty flag). If nothing is dirty, the recompute is a no-op.
+#
 # The byte-heavy polygons now live in R2 (per-muni GeoJSON blobs, uploaded only when their
 # content changed), and the write-only station_address_links table is no longer shipped. The
 # D1 derived dump is small text (segments + stations + amendments) and is shipped as a per-row
@@ -17,7 +24,8 @@
 # recompute that re-matched a few stations writes only those rows, not all ~76k every run.
 #
 # Usage:
-#   ./recompute.sh             # recompute everything; full reload of the derived dump
+#   ./recompute.sh             # incremental: re-match + re-tessellate only the dirty munis
+#   ./recompute.sh --full      # recompute every municipality (full stage04/05 rebuild)
 #   ./recompute.sh --no-fetch  # reuse existing artifacts/overrides.json + snapshot
 #   ./recompute.sh --no-import # rebuild locally, skip the remote R2/D1 import (and clear)
 set -e
@@ -25,10 +33,12 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 PY="$DIR/../.venv/bin/python"
 FETCH=1
 IMPORT=1
+FULL=0
 for arg in "$@"; do
   case "$arg" in
     --no-fetch)   FETCH=0 ;;
     --no-import)  IMPORT=0 ;;
+    --full)       FULL=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -42,10 +52,25 @@ else
   echo "-- skipping fetch (using existing artifacts/overrides.json + dirty_snapshot.json)"
 fi
 
+# Scope: the dirty municipalities drive an incremental stage04/05 (only their localities are
+# recomputed). --full forces a complete rebuild; an empty dirty set means nothing to do.
+SCOPE=""
+if [ "$FULL" = 1 ]; then
+  echo "-- full recompute (stage04/05 over every municipality)"
+else
+  MUNIS="$("$PY" "$DIR/dirty_scope.py" munis)"
+  if [ -z "$MUNIS" ]; then
+    echo "== nothing dirty; no recompute needed (use --full to force a rebuild) =="
+    exit 0
+  fi
+  SCOPE="--municipalities $MUNIS"
+  echo "-- incremental recompute scoped to dirty municipalities: $MUNIS"
+fi
+
 echo "-- stage04: matching (with overrides)"
-"$PY" "$DIR/stage04_match_addresses.py"
+"$PY" "$DIR/stage04_match_addresses.py" $SCOPE
 echo "-- stage05: Voronoi polygons"
-"$PY" "$DIR/stage05_voronoi.py"
+"$PY" "$DIR/stage05_voronoi.py" $SCOPE
 echo "-- stage06: build derived dump + R2 polygon blobs"
 "$PY" "$DIR/stage06_build_sqlite.py" >/dev/null
 

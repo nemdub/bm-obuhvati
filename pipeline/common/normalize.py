@@ -18,7 +18,10 @@ _STREET_ABBREV = {
     "ЈНА.": "ЈНА",
     "БР.": "",
     "УЛ.": "",
-    "ДР.": "ДР",
+    # Keep a separator: the register often glues the period to the name ("ДР.МЛАДЕНА"), and
+    # without the space the `\bДР\b` -> ДОКТОРА pass below can't fire, so it would normalize to
+    # "ДРМЛАДЕНА" and never converge with a doc's spaced "Др Младена" -> "ДОКТОРА МЛАДЕНА".
+    "ДР.": "ДР ",
 }
 
 _WS_RE = re.compile(r"\s+")

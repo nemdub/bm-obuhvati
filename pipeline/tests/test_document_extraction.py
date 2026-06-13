@@ -172,6 +172,27 @@ class TestRowsFromDoc:
         assert rows[0][2:] == ("ОСНОВНА ШКОЛА", "ЛУЧИЦА", "15. октобра 37-265 2-58, Сеоско сокаче")
 
 
+class TestIsDualScriptDoc:
+    """`_is_dual_script_doc` gates whether the HTML table may replace the txt parse for a
+    .doc: it must NOT for dual-script docs, whose HTML cells still carry both scripts."""
+
+    def _rows(self, *names):  # minimal (section, num, name, addr, cov) tuples
+        return [(None, i + 1, nm, "addr", "cov") for i, nm in enumerate(names)]
+
+    def test_doubled_name_cells_detected(self):
+        txt = self._rows("ЛОКАЛ ХАМЗАГИЋ РЕШАДА", "ЛОКАЛ СМАИЛОВИЋ РАМИЗА")
+        html = self._rows(
+            "ЛОКАЛ ХАМЗАГИЋ РЕШАДА LOKAL HAMZAGIĆ REŠADA",
+            "ЛОКАЛ СМАИЛОВИЋ РАМИЗА LOKAL SMAILOVIĆ RAMIZA",
+        )
+        assert S2._is_dual_script_doc(txt, html) is True
+
+    def test_single_script_doc_not_flagged(self):
+        # Identical name cells (no Latin twin) → safe to use the HTML columns.
+        rows = self._rows("ОСНОВНА ШКОЛА", "МЕСНА ЗАЈЕДНИЦА")
+        assert S2._is_dual_script_doc(rows, rows) is False
+
+
 class TestRowsFromDocTriplets:
     def test_groups_into_triplets(self):
         txt = "\n".join([

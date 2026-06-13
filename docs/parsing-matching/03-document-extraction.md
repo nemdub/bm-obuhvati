@@ -8,8 +8,9 @@ macOS `textutil` to convert `.doc` → txt (linearized) and `.docx`/table `.doc`
 (cells preserved).
 
 > Test target: `rows_from_docx`, `rows_from_doc`, `rows_from_doc_triplets`,
-> `_dedupe_dual_script`, `_is_quoted_fragment`, `clean_filename_to_candidate`, `deaccent`, `build_muni_matcher`,
-> `_header_start`, the file classification regexes, and the station‑id formula.
+> `_dedupe_dual_script`, `_is_dual_script_doc`, `_is_quoted_fragment`,
+> `clean_filename_to_candidate`, `deaccent`, `build_muni_matcher`, `_header_start`, the file
+> classification regexes, and the station‑id formula.
 
 ## 3.1 File classification
 
@@ -150,26 +151,42 @@ an opstina id; numbering restarts per section.
 Niš sections: `МЕДИЈАНА`=71331, `ПАЛИЛУЛА`=71323, `ПАНТЕЛЕЈ`=71307, `ЦРВЕНИ КРСТ`=71315,
 `НИШКА БАЊА`=71285.
 
-## 3.6 Fallbacks for number‑less `.doc` (the parse‑path ladder)
+## 3.6 `.doc` parse‑path: HTML columns over linearized text
 
-When `rows_from_doc` returns empty (no integer column) and the doc is **not** sectioned:
+A `.doc`'s real Word table renders to HTML with proper `<td>` cells. Those cells keep a
+station's columns intact **even when a cell wraps across a page break** — which is exactly
+what corrupts the *linearized* txt parse: textutil emits the wrapped cell as extra lines, so
+the rigid name=lines[0] / address=lines[1] / coverage=lines[2:] split shifts a column.
+Symptoms seen in the wild: the real address shoved into the coverage (Barajevo #19:
+`ПРОКИЋ КРАЈ` as address, `БАРАЈЕВО, ПРОКИЋ КРАЈ 49` lost into coverage), or the address
+truncated to its first wrapped line (Čoka: every `Врбица,`; Aleksandrovac villages: `НОВАЦИ`).
 
-1. **HTML table** (`rows_from_docx(textutil(path, "html"))`) — many number‑less `.doc` files
-   still carry a *real* Word table; `textutil` renders proper `<td>` cells. This keeps the
-   printed numbers and is immune to the drift that breaks the triplet fallback.
-2. **Triplet fallback** (`rows_from_doc_triplets`) — only when there is no usable table at
-   all. Groups the post‑header lines into rigid `(name, address, coverage)` 3‑tuples,
-   numbered sequentially. **Fragile**: any leftover header line or wrapped coverage cell
-   shifts the grouping and mis‑counts.
+So for a `.doc`, after `rows_from_doc` parses the txt, the HTML table is parsed too
+(`rows_from_docx`) and **replaces** the txt rows when it **agrees with them on the row count**
+(same station delimitation) — same rows, but columns that can't drift. Excluded:
 
-Sectioned docs **stay on the txt path** (the HTML table has no section structure).
+- **Sectioned docs** (`config.SECTIONED_DOCS`, e.g. Niš) — the HTML table carries no
+  `ГРАДСКА ОПШТИНА` section structure, so they stay on the txt path.
+- **Dual‑script docs** (`_is_dual_script_doc` — Tutin / Prijepolje / Sjenica) — the HTML cells
+  keep *both* scripts (`ЛОКАЛ ХАМЗАГИЋ РЕШАДА LOKAL HAMZAGIĆ REŠADA`); only the txt parser
+  de‑dups them (§3.4). Detected by the Latin twin: the html name cell contains the
+  transliteration of the de‑duped txt name.
+
+When the txt parse finds **no rows at all** (no integer column), the ladder is HTML table →
+**triplet fallback** (`rows_from_doc_triplets`, post‑header lines grouped into rigid 3‑tuples,
+numbered sequentially — fragile: any leftover header line or wrapped cell mis‑counts).
 
 ### Why
 
-The triplet fallback mis‑counted (Novi Sad parsed 215 vs declared 207, name/address shifted).
-Routing table‑bearing `.doc`s through the HTML parser corrected: Novi Sad 207, Negotin 72,
-Ruma 43, Ćićevac 18, Doljevac 37, Crna Trava 12. Known remaining unrelated count mismatches
-still WARN: Pančevo 74→73, Užice 83→88.
+The HTML table is the authoritative column model; the linearized text is a lossy flattening.
+Preferring HTML when the counts agree fixed wrapped‑cell column shifts across many munis
+(Barajevo, Čoka, Aleksandrovac, Beočin, …) — the single fix subsumes the earlier
+quoted‑name‑continuation heuristic (§3.4) and is immune to page breaks. The count‑agreement
+gate keeps the txt parse wherever the HTML `<tr>` split disagrees (e.g. Backi Petrovac 11 vs
+HTML 12, Priboj 48 vs 47, Šabac 100 vs 99, Voždovac 90 vs 91 — txt is right there). It also
+corrected the number‑less table‑bearing `.doc`s: Novi Sad 207, Negotin 72, Ruma 43, Ćićevac 18,
+Doljevac 37, Crna Trava 12. Known remaining unrelated count mismatches still WARN: Pančevo
+74→73, Užice 83→88.
 
 ## 3.7 Declared‑count check (`COUNT_RE`)
 

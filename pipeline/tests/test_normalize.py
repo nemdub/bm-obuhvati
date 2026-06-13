@@ -23,6 +23,11 @@ class TestNormalizeStreet:
         ("Ј.Н.А.", "ЈНА"),
         # "ДР" -> "ДОКТОРА" (whole word).
         ("Др Ђорђа Лазића", "ДОКТОРА ЂОРЂА ЛАЗИЋА"),
+        # "ДР." abbreviation expands whether or not a space follows the period, so the
+        # register's glued "ДР.МЛАДЕНА" converges with a doc's spaced "Др Младена".
+        ("ДР.МЛАДЕНА СТОЈАНОВИЋА", "ДОКТОРА МЛАДЕНА СТОЈАНОВИЋА"),
+        ("ДР. Младена Стојановића", "ДОКТОРА МЛАДЕНА СТОЈАНОВИЋА"),
+        ("Др Младена Стојановића", "ДОКТОРА МЛАДЕНА СТОЈАНОВИЋА"),
     ])
     def test_basic(self, raw, norm):
         assert normalize_street(raw) == norm

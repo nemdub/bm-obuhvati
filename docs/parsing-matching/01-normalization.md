@@ -24,7 +24,9 @@ several steps depend on earlier ones):
 4. **Expand abbreviations** (`_STREET_ABBREV`, literal substring replace):
    - `Ј.Н.А.` → `ЈНА`, `ЈНА.` → `ЈНА`
    - `БР.` → `` (dropped), `УЛ.` → `` (dropped)
-   - `ДР.` → `ДР`
+   - `ДР.` → `ДР ` (note the trailing space — the register often glues the period to the
+     name, e.g. `ДР.МЛАДЕНА`; keeping a separator lets step 7's whole‑word `ДР` → `ДОКТОРА`
+     still fire, so `ДР.МЛАДЕНА` and a doc's `Др Младена` both reach `ДОКТОРА МЛАДЕНА`)
 5. **Drop punctuation** — keep only Cyrillic/Latin letters, digits, spaces; everything else
    becomes a space.
 6. **Fold Latin↔Cyrillic homoglyphs** (`_fold_homoglyphs`, see 1.2).
@@ -39,6 +41,7 @@ several steps depend on earlier ones):
 |-------|-------------------|
 | `Улица: 8. Март` | `8 МАРТ` |
 | `Др Ђорђа Лазића` | `ДОКТОРА ЂОРЂА ЛАЗИЋА` |
+| `ДР.МЛАДЕНА СТОЈАНОВИЋА` | `ДОКТОРА МЛАДЕНА СТОЈАНОВИЋА` |
 | `Ј.Н.А.` | `ЈНА` |
 | `XII војвођанске` | `12 ВОЈВОЂАНСКЕ` |
 | `Краља Петра Првог` | `КРАЉА ПЕТРА 1` |

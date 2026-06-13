@@ -142,6 +142,24 @@ def _dedupe_dual_script(cur: list[str]) -> list[str]:
     return out
 
 
+def _is_dual_script_doc(txt_rows: list, html_rows: list) -> bool:
+    """Whether a doc prints every cell twice (Cyrillic then Latin) — Tutin / Prijepolje /
+    Sjenica. The txt parser de-dups these (``_dedupe_dual_script`` in ``rows_from_doc``),
+    but the HTML cells keep BOTH scripts, so the HTML table must NOT replace the txt parse
+    for them. Detect by the Latin twin: the html name cell contains the transliteration of
+    the (already de-duped) txt name. Sampled over the first rows for robustness."""
+    hits = checked = 0
+    for (*_, tn, _, _), (*_, hn, _, _) in zip(txt_rows, html_rows):
+        if not tn.strip():
+            continue
+        checked += 1
+        if collapse(cyr_to_lat(tn)).casefold() in collapse(hn).casefold():
+            hits += 1
+        if checked >= 5:
+            break
+    return checked > 0 and hits * 2 >= checked
+
+
 SECTION_RE = re.compile(r"ГРАДСКА\s+ОПШТИНА\s+(.+)", re.IGNORECASE)
 
 # Quote glyphs a venue's proper name is wrapped in (`` ``…`` ``, "…", „…“, «…»).
@@ -318,15 +336,20 @@ def main() -> int:
             rows = rows_from_docx(textutil(path, "html"))
         else:
             rows = rows_from_doc(txt, section_map or None)
-            if not rows:
-                # No number column in the linearized text. Some .doc files still carry a
-                # real Word table; textutil renders it to HTML with proper cells, so parse
-                # that the same way as a .docx. It keeps the printed numbers and is immune
-                # to the multi-line-header / wrapped-coverage drift that makes the rigid
-                # 3-line triplet grouping mis-count (e.g. Novi Sad: 215 vs the declared
-                # 207). Sectioned docs stay on the txt path so section assignment holds;
-                # the triplet fallback only runs when there is no usable table at all.
-                html_rows = rows_from_docx(textutil(path, "html")) if not section_map else []
+            # A .doc's real Word table renders to HTML with proper <td> cells, which keep a
+            # cell's columns intact even when textutil's *linearized* text drifts — a cell
+            # that wraps across a page break splits into extra lines there, shoving the
+            # address into the coverage (Barajevo #19) or truncating it (Čoka, Aleksandrovac
+            # villages). When the HTML table agrees with the txt parse on the row count (same
+            # station delimitation) we trust its columns instead. Excluded: sectioned docs
+            # (the HTML has no "ГРАДСКА ОПШТИНА" structure) and dual-script docs (HTML keeps
+            # both scripts per cell; the txt parser de-dups them). The triplet fallback only
+            # runs when the txt parse finds no usable table at all.
+            html_rows = rows_from_docx(textutil(path, "html")) if not section_map else []
+            if rows:
+                if html_rows and len(html_rows) == len(rows) and not _is_dual_script_doc(rows, html_rows):
+                    rows = html_rows
+            else:
                 rows = html_rows or rows_from_doc_triplets(txt)
 
         declared = None
