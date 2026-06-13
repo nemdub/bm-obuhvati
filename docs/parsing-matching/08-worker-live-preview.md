@@ -78,6 +78,14 @@ For each candidate address of a station's resolved streets:
 Mirrors stage04's `sett_whole` expansion and the `manual_settlement` / `settlement` claim
 kinds.
 
+> **D1 bind‑parameter cap.** A whole‑settlement claim can expand to **hundreds** of streets
+> (a leading town heading like `ПОЖАРЕВАЦ` → all 534 town streets; `КРАГУЈЕВАЦ` → 1498). D1
+> allows at most **100 bound parameters per query**, so the `street_id IN (…)` lookups in
+> `pointsForStation` and `streetLinesForStation` are run in chunks of `D1_IN_CHUNK = 90` via
+> `selectByStreetIds` and concatenated — binding all ids in one statement throws and returns a
+> 500 for the whole station's map. (The spurious town‑heading claims themselves are a separate
+> stage04 concern.)
+
 ## 8.5 Override resolution (`effectiveParsed`, `effStreet`)
 
 - **`effectiveParsed(seg)`**: parse `ov_json ?? parsed_json` into

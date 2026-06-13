@@ -300,23 +300,42 @@ async function resolveSegStreets(db: D1Database, segs: SegmentRow[]) {
   return segStreets;
 }
 
+// D1 caps bound parameters at 100 per query. A whole-settlement claim can span hundreds of
+// streets (e.g. a leading town heading expands to every street of the town — 534 for
+// Пожаревац, 1498 for Крагујевац), so run the `street_id IN (...)` lookups in chunks under
+// the cap and concatenate, rather than binding all ids in one statement (which throws → 500).
+const D1_IN_CHUNK = 90;
+
+async function selectByStreetIds<T>(
+  db: D1Database,
+  sqlFor: (placeholders: string) => string,
+  streetIds: string[]
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < streetIds.length; i += D1_IN_CHUNK) {
+    const chunk = streetIds.slice(i, i + D1_IN_CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const { results } = await db.prepare(sqlFor(placeholders)).bind(...chunk).all<T>();
+    if (results) out.push(...results);
+  }
+  return out;
+}
+
 export async function pointsForStation(db: D1Database, stationId: number) {
   const segs = await getSegments(db, stationId);
   const segStreets = await resolveSegStreets(db, segs);
   const streetIds = [...new Set([...segStreets.values()].flat())];
   if (streetIds.length === 0) return { type: "FeatureCollection", features: [] };
 
-  const placeholders = streetIds.map(() => "?").join(",");
-  const { results } = await db
-    .prepare(
-      `SELECT id, street_id, house_num, house_suffix, house_raw, lat, lon
-         FROM addresses WHERE street_id IN (${placeholders})`
-    )
-    .bind(...streetIds)
-    .all<AddrRow>();
+  const results = await selectByStreetIds<AddrRow>(
+    db,
+    (ph) => `SELECT id, street_id, house_num, house_suffix, house_raw, lat, lon
+         FROM addresses WHERE street_id IN (${ph})`,
+    streetIds
+  );
 
   const byStreet = new Map<string, AddrRow[]>();
-  for (const a of results ?? []) {
+  for (const a of results) {
     const arr = byStreet.get(a.street_id) ?? [];
     arr.push(a);
     byStreet.set(a.street_id, arr);
@@ -382,12 +401,12 @@ export async function streetLinesForStation(db: D1Database, stationId: number) {
   const streetIds = [...new Set([...segStreets.values()].flat())];
   if (streetIds.length === 0) return { type: "FeatureCollection", features: [] };
 
-  const placeholders = streetIds.map(() => "?").join(",");
-  const { results } = await db
-    .prepare(`SELECT street_id, geojson FROM street_geometry WHERE street_id IN (${placeholders})`)
-    .bind(...streetIds)
-    .all<{ street_id: string; geojson: string }>();
-  const byStreet = new Map((results ?? []).map((r) => [r.street_id, r.geojson]));
+  const results = await selectByStreetIds<{ street_id: string; geojson: string }>(
+    db,
+    (ph) => `SELECT street_id, geojson FROM street_geometry WHERE street_id IN (${ph})`,
+    streetIds
+  );
+  const byStreet = new Map(results.map((r) => [r.street_id, r.geojson]));
 
   const features: unknown[] = [];
   for (const seg of segs) {
