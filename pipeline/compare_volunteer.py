@@ -414,6 +414,57 @@ def write_muni_report(out_dir: Path, name: str, polygon_muni_id: str, files: lis
     }
 
 
+def coverage_supplement_section(groups_summary: list[dict]) -> list[str]:
+    """How much area would automated polygons add when supplementing the volunteer set?
+
+    Two granularities: whole municipalities volunteers never mapped (the large gain), and
+    spatial gaps within already-covered municipalities (small — volunteers tend to over-draw)."""
+    poly = pl.read_parquet(config.POLYGONS_PARQUET).with_columns(
+        (pl.col("station_id") // STATION_BASE_MULT).alias("muni"))
+    area_by_muni = {str(r["muni"]): r["a"] / 1e6 for r in
+                    poly.group_by("muni").agg(pl.col("area_m2").sum().alias("a")).iter_rows(named=True)}
+    total_auto = sum(area_by_muni.values())
+    covered = {g["polygon_muni_id"] for g in groups_summary}
+    covered_auto = sum(area_by_muni.get(m, 0.0) for m in covered)
+    uncovered = [m for m in area_by_muni if m not in covered]
+    uncovered_auto = total_auto - covered_auto
+
+    # within covered munis: automated area not already under a volunteer unit
+    auto_only = [(g["auto_union_km2"] - g["overlap_km2"], g) for g in groups_summary]
+    # near-zero overlap == unusable volunteer file (mislocated / wrong CRS): automated effectively
+    # supplies the whole municipality there, so separate it from genuine within-muni infill.
+    broken = [(a, g) for a, g in auto_only
+              if g["auto_union_km2"] and g["overlap_km2"] < 0.05 * g["auto_union_km2"]]
+    genuine_gap = sum(a for a, g in auto_only) - sum(a for a, _ in broken)
+
+    L = ["## Coverage supplement (automated on top of volunteer)\n"]
+    L.append(f"Automated polygons span **{len(area_by_muni)}** municipalities "
+             f"(**{total_auto:,.0f} km²**); volunteers cover **{len(covered)}** of them.\n")
+    L.append("**By municipality (the large gain):**")
+    L.append(f"- Volunteer-covered: {len(covered)} munis, {covered_auto:,.0f} km² "
+             f"({covered_auto/total_auto*100:.0f}% of automated area).")
+    L.append(f"- **No volunteer data: {len(uncovered)} munis, {uncovered_auto:,.0f} km² "
+             f"({uncovered_auto/total_auto*100:.0f}%)** — supplementing adds all of this.\n")
+    L.append("**Within already-covered munis (small — volunteers over-draw):**")
+    L.append(f"- Volunteer union {sum(g['vol_union_km2'] for g in groups_summary):,.0f} km² vs "
+             f"automated union {sum(g['auto_union_km2'] for g in groups_summary):,.0f} km² "
+             f"(overlap {sum(g['overlap_km2'] for g in groups_summary):,.0f} km²).")
+    L.append(f"- Genuine automated-only infill: **~{genuine_gap:,.0f} km²**; plus "
+             f"{sum(a for a, _ in broken):,.0f} km² from {len(broken)} unusable volunteer files "
+             f"({', '.join(g['name'] for _, g in broken)}) where automated supplies the whole muni.\n")
+    L.append("Net: the supplement is overwhelmingly **breadth** — the "
+             f"{uncovered_auto:,.0f} km² of unmapped municipalities — not infill of covered ones.\n")
+    L.append("### Municipalities with no volunteer coverage (largest automated area first)\n")
+    L.append("| muni | area km² |")
+    L.append("|---|---|")
+    names = {str(r["id"]): r["name_lat"]
+             for r in pl.read_parquet(config.MUNICIPALITIES_PARQUET).iter_rows(named=True)}
+    for m in sorted(uncovered, key=lambda m: -area_by_muni[m]):
+        L.append(f"| {m} {names.get(m, '')} | {area_by_muni[m]:,.0f} |")
+    L.append("")
+    return L
+
+
 def write_summary(groups_summary: list[dict]):
     ranked = sorted(groups_summary, key=lambda g: g["iou_mean"])
     L = []
@@ -425,6 +476,7 @@ def write_summary(groups_summary: list[dict]):
              f"(median {st.median(all_ious):.3f})")
     L.append(f"- Municipalities with mean IoU < 0.4: "
              f"**{sum(1 for g in groups_summary if g['iou_mean'] < 0.4)}**\n")
+    L += coverage_supplement_section(groups_summary)
     L.append("## Ranked by mean IoU (worst first)\n")
     L.append("| muni | name | mean IoU | median | matched/auto/vol | area ratio | containment | agreement | BR_BM✓ |")
     L.append("|---|---|---|---|---|---|---|---|---|")
