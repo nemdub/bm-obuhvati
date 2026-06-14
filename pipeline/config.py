@@ -43,6 +43,19 @@ ADDITIONS_JSON = ARTIFACTS_DIR / "additions.json"  # reviewer-added street claim
 DIRTY_SNAPSHOT_JSON = ARTIFACTS_DIR / "dirty_snapshot.json"  # station_status dirty rows at fetch time
 CLEAR_DIRTY_SQL = ARTIFACTS_DIR / "clear_dirty.sql"  # race-safe dirty=0 UPDATEs (post-import)
 ADDED_SEG_BASE = 9_000_000_000_000  # synthetic segment-id base (shared with the Worker)
+
+# Station-level reviewer edits (worker-owned; exported by fetch_overrides.sh, applied by
+# stage03c_reconcile_edits.py). See docs/parsing-matching/10-station-edits.md.
+TEXT_OVERRIDES_JSON = ARTIFACTS_DIR / "text_overrides.json"      # corrected raw coverage text
+ADDED_STATIONS_JSON = ARTIFACTS_DIR / "added_stations.json"      # brand-new stations
+REMOVED_STATIONS_JSON = ARTIFACTS_DIR / "removed_stations.json"  # tombstoned stations
+# Pristine (edit-free) snapshots stage03c rebuilds the canonical parquets from each recompute,
+# so reverting a text fix or restoring a removed station recovers without a full re-parse.
+# Refreshed by stage03b at the end of a full rebuild (and bootstrapped by stage03c if missing).
+STATIONS_PRISTINE_PARQUET = ARTIFACTS_DIR / "stations_pristine.parquet"
+SEGMENTS_AMENDED_PRISTINE_PARQUET = ARTIFACTS_DIR / "segments_amended_pristine.parquet"
+ADDED_STATION_BASE = 9_500_000_000_000  # synthetic station-id base (shared with the Worker)
+
 SQLITE_OUT = ARTIFACTS_DIR / "bm.sqlite"
 
 # ── Coordinate reference systems ────────────────────────────────────────────

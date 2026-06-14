@@ -67,6 +67,12 @@ else
   echo "-- incremental recompute scoped to dirty municipalities: $MUNIS"
 fi
 
+# Apply station-level edits (corrected source text, added stations, tombstones) onto the
+# canonical parquets before matching. Rebuilds them from the pristine snapshots each run, so
+# this is also where a reverted/restored edit is undone. No-op when there are no such edits.
+echo "-- stage03c: reconcile station-level edits"
+"$PY" "$DIR/stage03c_reconcile_edits.py"
+
 echo "-- stage04: matching (with overrides)"
 "$PY" "$DIR/stage04_match_addresses.py" $SCOPE
 echo "-- stage05: Voronoi polygons"

@@ -174,6 +174,11 @@ def main() -> int:
     )
     stations.write_parquet(config.STATIONS_PARQUET)
 
+    # Refresh the pristine (edit-free) snapshots stage03c rebuilds from each recompute, so a
+    # reverted text fix or a restored station recovers without another full re-parse.
+    stations.write_parquet(config.STATIONS_PRISTINE_PARQUET)
+    pl.read_parquet(config.SEGMENTS_AMENDED_PARQUET).write_parquet(config.SEGMENTS_AMENDED_PRISTINE_PARQUET)
+
     n_ok = sum(a["applied"] for a in amend_audit)
     print(f"  amendment ops: {len(amend_audit)}  applied: {n_ok}  "
           f"unparsed: {sum(1 for a in amend_audit if a['op']=='other')}  "

@@ -15,6 +15,34 @@
   ];
   const color = (n) => PALETTE[((n % PALETTE.length) + PALETTE.length) % PALETTE.length];
 
+  // "+ Add station": reveal the form, POST a new (reviewer-added) station, open its page.
+  const addBtn = document.getElementById("add-station-btn");
+  const addForm = document.getElementById("add-station-form");
+  if (addBtn && addForm) {
+    addBtn.addEventListener("click", () => {
+      addForm.style.display = addForm.style.display === "none" ? "block" : "none";
+    });
+    document.getElementById("as-cancel").addEventListener("click", () => {
+      addForm.style.display = "none";
+    });
+    document.getElementById("as-save").addEventListener("click", async () => {
+      const name = document.getElementById("as-name").value.trim();
+      if (!name) { document.getElementById("as-name").focus(); return; }
+      const numRaw = document.getElementById("as-number").value.trim();
+      const res = await fetch(`/api/m/${cfg.muniId}/stations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name_cyr: name,
+          address_cyr: document.getElementById("as-address").value.trim() || null,
+          number: numRaw ? Number(numRaw) : null,
+          raw_coverage_text: document.getElementById("as-text").value.trim(),
+        }),
+      }).then((r) => r.json());
+      if (res && res.station_id) window.location.href = `/s/${res.station_id}`;
+    });
+  }
+
   // Sortable stations table: by polling-station number (default) and checks-needed.
   const table = document.getElementById("stations-table");
   if (table && table.tBodies.length) {

@@ -542,9 +542,71 @@
     segs.forEach((s) => wrap.appendChild(renderSegment(s)));
   }
 
+  // Inline editor for the station's raw coverage source text. Saving re-parses on the next
+  // recompute (and, for real stations, drops this station's manual segment edits — hence the
+  // warning). A full page reload reflects the server-rendered source block + badges.
+  function editSourceText() {
+    const srcText = document.querySelector("#source .source-text");
+    if (!srcText || srcText.dataset.editing) return;
+    srcText.dataset.editing = "1";
+    const original = srcText.textContent;
+    const ta = document.createElement("textarea");
+    ta.className = "source-edit";
+    ta.rows = 4;
+    ta.value = original;
+    const hint = document.createElement("p");
+    hint.className = "edit-hint";
+    hint.textContent = L_.textHint;
+    const actions = document.createElement("div");
+    actions.className = "seg-actions";
+    actions.append(
+      mkBtn(L_.save, "btn primary", async () => {
+        await fetch(api("/text"), {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ raw_coverage_text: ta.value }),
+        });
+        window.location.reload();
+      }),
+      mkBtn(L_.cancel, "btn", () => window.location.reload()),
+    );
+    srcText.replaceWith(ta);
+    ta.after(hint, actions);
+    ta.focus();
+  }
+
+  function renderStationTools() {
+    const tools = document.getElementById("station-tools");
+    if (!tools) return;
+    tools.innerHTML = "";
+    if (cfg.removed) {
+      tools.appendChild(mkBtn(L_.restoreStation, "btn primary", async () => {
+        await fetch(api("/remove"), { method: "DELETE" });
+        window.location.reload();
+      }));
+      return;
+    }
+    tools.appendChild(mkBtn(L_.editText, "btn", editSourceText));
+    if (cfg.isAdded) {
+      tools.appendChild(mkBtn(L_.deleteStation, "btn danger", async () => {
+        if (!confirm(L_.removeStationConfirm)) return;
+        await fetch(api("/added"), { method: "DELETE" });
+        window.location.href = `/m/${cfg.muniId}`;
+      }));
+    } else {
+      tools.appendChild(mkBtn(L_.removeStation, "btn danger", async () => {
+        if (!confirm(L_.removeStationConfirm)) return;
+        await fetch(api("/remove"), {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        });
+        window.location.reload();
+      }));
+    }
+  }
+
   async function reload() {
     await Promise.all([renderSegments(), loadMap()]);
   }
 
+  renderStationTools();
   reload();
 })();

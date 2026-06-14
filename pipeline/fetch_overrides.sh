@@ -34,3 +34,33 @@ rows = data[0]['results'] if data and 'results' in data[0] else []
 json.dump(rows, open('$DIR/artifacts/dirty_snapshot.json', 'w'), ensure_ascii=False)
 print(f'wrote {len(rows)} dirty stations -> artifacts/dirty_snapshot.json')
 "
+
+# Station-level edits (stage03c_reconcile_edits consumes these): corrected source text,
+# brand-new stations, and tombstones. See docs/parsing-matching/10-station-edits.md.
+npx wrangler d1 execute bm-obuhvati --remote --json \
+  --command "SELECT station_id, raw_coverage_text FROM station_text_overrides" \
+  | "$DIR/../.venv/bin/python" -c "
+import sys, json
+data = json.load(sys.stdin)
+rows = data[0]['results'] if data and 'results' in data[0] else []
+json.dump(rows, open('$DIR/artifacts/text_overrides.json', 'w'), ensure_ascii=False)
+print(f'wrote {len(rows)} text overrides -> artifacts/text_overrides.json')
+"
+npx wrangler d1 execute bm-obuhvati --remote --json \
+  --command "SELECT id, municipality_id, number, name_cyr, address_cyr, raw_coverage_text FROM added_stations" \
+  | "$DIR/../.venv/bin/python" -c "
+import sys, json
+data = json.load(sys.stdin)
+rows = data[0]['results'] if data and 'results' in data[0] else []
+json.dump(rows, open('$DIR/artifacts/added_stations.json', 'w'), ensure_ascii=False)
+print(f'wrote {len(rows)} added stations -> artifacts/added_stations.json')
+"
+npx wrangler d1 execute bm-obuhvati --remote --json \
+  --command "SELECT station_id FROM removed_stations" \
+  | "$DIR/../.venv/bin/python" -c "
+import sys, json
+data = json.load(sys.stdin)
+rows = data[0]['results'] if data and 'results' in data[0] else []
+json.dump(rows, open('$DIR/artifacts/removed_stations.json', 'w'), ensure_ascii=False)
+print(f'wrote {len(rows)} removed stations -> artifacts/removed_stations.json')
+"

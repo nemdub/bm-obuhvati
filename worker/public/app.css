@@ -130,7 +130,26 @@ tr.city-child td:first-child { padding-left: 30px; }
 .btn-export:hover { background: #eef4fb; border-color: var(--blue); color: var(--blue); }
 .btn { border: 1px solid var(--line); background: #fafbfc; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; }
 .btn.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+.btn.danger { color: var(--warn); border-color: #ffd9b0; }
+.btn.danger:hover { background: #fff0e0; }
 .flash { color: var(--ok); font-size: 12px; }
+
+/* Station-level edits: source-text editor, add/remove controls */
+.station-tools { display: flex; gap: 8px; margin: 10px 0 4px; flex-wrap: wrap; }
+.source-edit { width: 100%; box-sizing: border-box; font-size: 13px; line-height: 1.5;
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.edit-hint { font-size: 12px; color: var(--warn); margin: 6px 0 0; }
+.removed-banner { background: #fff0e0; color: var(--warn); border: 1px solid #ffd9b0;
+  border-radius: 6px; padding: 8px 10px; font-size: 13px; margin: 8px 0; }
+tr.removed-row td { opacity: .55; text-decoration: line-through; }
+tr.removed-row td .badge { text-decoration: none; }
+.add-station-form { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 16px; margin-bottom: 16px; max-width: 540px; }
+.add-station-form h3 { margin: 0 0 10px; font-size: 15px; }
+.add-station-form label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.add-station-form input, .add-station-form textarea { width: 100%; box-sizing: border-box;
+  margin-top: 3px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+.add-station-form .form-actions { display: flex; gap: 8px; }
 
 #toast {
   position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(10px);

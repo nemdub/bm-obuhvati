@@ -71,6 +71,21 @@ export const STRINGS = {
   source: "Извор",
   base: "основно",
   amendment: "измена",
+  editText: "Измени изворни текст",
+  textHint: "Измена изворног текста поново парсира сегменте и брише ручне измене сегмената овог бирачког места.",
+  textCorrected: "Изворни текст је исправљен",
+  removeStation: "Уклони бирачко место",
+  removeStationConfirm: "Уклонити ово бирачко место? Неће се појављивати на мапи ни у извозу.",
+  restoreStation: "Врати бирачко место",
+  stationRemoved: "Бирачко место је уклоњено",
+  addStation: "Додај бирачко место",
+  addStationTitle: "Ново бирачко место",
+  deleteStation: "Обриши бирачко место",
+  addedStation: "ручно додато",
+  fieldName: "Назив",
+  fieldAddress: "Адреса",
+  fieldNumber: "Број",
+  fieldCoverageText: "Текст обухвата",
 } as const;
 
 // Why a segment is flagged for review, keyed by the pipeline's reason codes (Cyrillic

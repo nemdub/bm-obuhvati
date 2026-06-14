@@ -6,6 +6,7 @@ import {
   listMunicipalities, getMunicipality, listStations, getStation, getSegments,
   pointsForStation, streetLinesForStation, allMuniPolygons, effectiveParsed, searchStreets,
   muniBoundaries, allBoundaries, summaryStats, settIdOfPick, NONE_PICK,
+  removedStationIds, ADDED_STATION_BASE, isAddedStationId,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
 import { buildGeoJSON, buildKML, muniSlug, type ExportRow } from "./export";
@@ -202,6 +203,130 @@ app.delete("/api/added/:addedId", async (c) => {
   return c.json({ ok: true });
 });
 
+// ── Station-level edits (worker-owned; consumed by the pipeline reconcile step) ──────────
+
+// Correct an existing station's raw coverage text. The pipeline re-parses it into fresh
+// segments on the next recompute; because segment ids are positional, that invalidates any
+// manual segment edits on this station — so purge them here (see memory reparse-stale-overrides).
+app.put("/api/s/:id/text", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ raw_coverage_text?: string }>();
+  const text = (body.raw_coverage_text ?? "").trim();
+  if (isAddedStationId(id)) {
+    // Added stations keep their text in added_stations, not a separate override row.
+    const aid = id - ADDED_STATION_BASE;
+    const row = await c.env.DB.prepare("SELECT id FROM added_stations WHERE id = ?").bind(aid).first();
+    if (!row) return c.notFound();
+    await c.env.DB.prepare("UPDATE added_stations SET raw_coverage_text = ? WHERE id = ?")
+      .bind(text, aid).run();
+    await markDirty(c.env.DB, id);
+    return c.json({ ok: true });
+  }
+  const st = await c.env.DB.prepare("SELECT id FROM polling_stations WHERE id = ?").bind(id).first();
+  if (!st) return c.notFound();
+  await c.env.DB.prepare(
+    `INSERT INTO station_text_overrides (station_id, raw_coverage_text, updated_at)
+     VALUES (?1, ?2, datetime('now'))
+     ON CONFLICT(station_id) DO UPDATE SET raw_coverage_text = ?2, updated_at = datetime('now')`
+  ).bind(id, text).run();
+  // Re-parse will renumber this station's segments — drop now-stale overrides.
+  await c.env.DB.prepare(
+    `DELETE FROM segment_overrides WHERE segment_id IN
+       (SELECT id FROM coverage_segments WHERE station_id = ?)`
+  ).bind(id).run();
+  await markDirty(c.env.DB, id);
+  return c.json({ ok: true });
+});
+
+app.delete("/api/s/:id/text", async (c) => {
+  const id = Number(c.req.param("id"));
+  const st = await c.env.DB.prepare("SELECT id FROM polling_stations WHERE id = ?").bind(id).first();
+  if (!st) return c.notFound();
+  await c.env.DB.prepare("DELETE FROM station_text_overrides WHERE station_id = ?").bind(id).run();
+  await markDirty(c.env.DB, id);
+  return c.json({ ok: true });
+});
+
+// Add a brand-new station the document omitted. Coverage is entered as raw text and parsed by
+// the pipeline reconcile step. Returns the synthetic station id so the UI can open it.
+app.post("/api/m/:id/stations", async (c) => {
+  const muniId = c.req.param("id");
+  const body = await c.req.json<{
+    name_cyr?: string; address_cyr?: string; number?: number; raw_coverage_text?: string;
+  }>();
+  const name = (body.name_cyr ?? "").trim();
+  if (!name) return c.json({ ok: false, error: "name_cyr required" }, 400);
+  const muni = await c.env.DB.prepare("SELECT id FROM municipalities WHERE id = ?").bind(muniId).first();
+  if (!muni) return c.json({ ok: false, error: "unknown municipality" }, 400);
+  // Auto-assign the next printed number within the muni when none is given (covers both real
+  // and previously-added stations).
+  let number = body.number ?? null;
+  if (number == null) {
+    const row = await c.env.DB.prepare(
+      `SELECT MAX(n) AS n FROM (
+         SELECT MAX(number) AS n FROM polling_stations WHERE municipality_id = ?1
+         UNION ALL SELECT MAX(number) AS n FROM added_stations WHERE municipality_id = ?1)`
+    ).bind(muniId).first<{ n: number | null }>();
+    number = (row?.n ?? 0) + 1;
+  }
+  const res = await c.env.DB.prepare(
+    `INSERT INTO added_stations (municipality_id, number, name_cyr, address_cyr, raw_coverage_text, created_at)
+     VALUES (?, ?, ?, ?, ?, datetime('now'))`
+  ).bind(muniId, number, name, body.address_cyr ?? null, (body.raw_coverage_text ?? "").trim()).run();
+  const stationId = ADDED_STATION_BASE + Number(res.meta.last_row_id);
+  await markDirty(c.env.DB, stationId);
+  return c.json({ ok: true, station_id: stationId });
+});
+
+// Edit a reviewer-added station's metadata (name / address / number).
+app.put("/api/s/:id/added", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!isAddedStationId(id)) return c.json({ ok: false, error: "not an added station" }, 400);
+  const aid = id - ADDED_STATION_BASE;
+  const body = await c.req.json<{ name_cyr?: string; address_cyr?: string; number?: number }>();
+  const row = await c.env.DB.prepare("SELECT id FROM added_stations WHERE id = ?").bind(aid).first();
+  if (!row) return c.notFound();
+  await c.env.DB.prepare(
+    `UPDATE added_stations SET
+       name_cyr = COALESCE(?2, name_cyr),
+       address_cyr = ?3,
+       number = COALESCE(?4, number)
+     WHERE id = ?1`
+  ).bind(aid, body.name_cyr?.trim() || null, body.address_cyr?.trim() ?? null, body.number ?? null).run();
+  await markDirty(c.env.DB, id);
+  return c.json({ ok: true });
+});
+
+app.delete("/api/s/:id/added", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!isAddedStationId(id)) return c.json({ ok: false, error: "not an added station" }, 400);
+  await c.env.DB.prepare("DELETE FROM added_stations WHERE id = ?").bind(id - ADDED_STATION_BASE).run();
+  await markDirty(c.env.DB, id);
+  return c.json({ ok: true });
+});
+
+// Remove (tombstone) / restore an existing station.
+app.post("/api/s/:id/remove", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ reason?: string }>().catch(() => ({ reason: undefined }));
+  const st = await c.env.DB.prepare("SELECT id FROM polling_stations WHERE id = ?").bind(id).first();
+  if (!st) return c.notFound();
+  await c.env.DB.prepare(
+    `INSERT INTO removed_stations (station_id, reason, removed_at)
+     VALUES (?1, ?2, datetime('now'))
+     ON CONFLICT(station_id) DO UPDATE SET reason = ?2, removed_at = datetime('now')`
+  ).bind(id, body.reason ?? null).run();
+  await markDirty(c.env.DB, id);
+  return c.json({ ok: true });
+});
+
+app.delete("/api/s/:id/remove", async (c) => {
+  const id = Number(c.req.param("id"));
+  await c.env.DB.prepare("DELETE FROM removed_stations WHERE station_id = ?").bind(id).run();
+  await markDirty(c.env.DB, id);
+  return c.json({ ok: true });
+});
+
 app.get("/api/s/:id/streets", async (c) => {
   const script = getScript(c);
   const q = (c.req.query("q") ?? "").trim();
@@ -217,13 +342,14 @@ app.get("/api/s/:id/streets", async (c) => {
 
 app.get("/api/m/:id/polygons.geojson", async (c) => {
   const script = getScript(c);
-  const [rows, bounds] = await Promise.all([
+  const [rows, bounds, removed] = await Promise.all([
     allMuniPolygons(c.env.POLY, c.req.param("id")),
     muniBoundaries(c.env.DB, c.req.param("id")),
+    removedStationIds(c.env.DB, c.req.param("id")),
   ]);
   return c.json({
     type: "FeatureCollection",
-    features: rows.map((r) => ({
+    features: rows.filter((r) => !removed.has(r.station_id)).map((r) => ({
       type: "Feature",
       geometry: JSON.parse(r.geojson),
       properties: {
@@ -242,9 +368,12 @@ app.get("/api/m/:id/polygons.geojson", async (c) => {
 app.get("/api/m/:id/export.geojson", async (c) => {
   const script = getScript(c);
   const id = c.req.param("id");
-  const [muni, rows] = await Promise.all([getMunicipality(c.env.DB, id), allMuniPolygons(c.env.POLY, id)]);
+  const [muni, rows, removed] = await Promise.all([
+    getMunicipality(c.env.DB, id), allMuniPolygons(c.env.POLY, id), removedStationIds(c.env.DB, id),
+  ]);
   if (!muni) return c.notFound();
-  const body = JSON.stringify(buildGeoJSON(rows as ExportRow[], muni.name_cyr, script));
+  const kept = rows.filter((r) => !removed.has(r.station_id));
+  const body = JSON.stringify(buildGeoJSON(kept as ExportRow[], muni.name_cyr, script));
   c.header("Content-Type", "application/geo+json; charset=utf-8");
   c.header("Content-Disposition", `attachment; filename="${muniSlug(muni.name_lat)}.geojson"`);
   return c.body(body);
@@ -253,9 +382,11 @@ app.get("/api/m/:id/export.geojson", async (c) => {
 app.get("/api/m/:id/export.kml", async (c) => {
   const script = getScript(c);
   const id = c.req.param("id");
-  const [muni, rows] = await Promise.all([getMunicipality(c.env.DB, id), allMuniPolygons(c.env.POLY, id)]);
+  const [muni, rows, removed] = await Promise.all([
+    getMunicipality(c.env.DB, id), allMuniPolygons(c.env.POLY, id), removedStationIds(c.env.DB, id),
+  ]);
   if (!muni) return c.notFound();
-  const body = buildKML(rows as ExportRow[], muni.name_cyr, script);
+  const body = buildKML(rows.filter((r) => !removed.has(r.station_id)) as ExportRow[], muni.name_cyr, script);
   c.header("Content-Type", "application/vnd.google-earth.kml+xml; charset=utf-8");
   c.header("Content-Disposition", `attachment; filename="${muniSlug(muni.name_lat)}.kml"`);
   return c.body(body);
@@ -288,14 +419,15 @@ app.get("/api/s/:id/polygon.geojson", async (c) => {
   const id = Number(c.req.param("id"));
   const st = await getStation(c.env.DB, id);
   // One R2 read of the muni blob yields this station's polygon AND its neighbours.
-  const [rows, bounds] = st
+  const [rows, bounds, removed] = st
     ? await Promise.all([
         allMuniPolygons(c.env.POLY, st.municipality_id),
         muniBoundaries(c.env.DB, st.municipality_id),
+        removedStationIds(c.env.DB, st.municipality_id),
       ])
-    : [[], []];
+    : [[], [], new Set<number>()];
   const self = rows.find((r) => r.station_id === id);
-  const neighbors = rows.filter((r) => r.station_id !== id);
+  const neighbors = rows.filter((r) => r.station_id !== id && !removed.has(r.station_id));
   return c.json({
     polygon: self ? JSON.parse(self.geojson) : null,
     meta: self ? { area_m2: self.area_m2, point_count: self.point_count, computed_at: self.computed_at } : null,

@@ -132,9 +132,11 @@ export function stationsView(
   const script = getScript(c);
   const t = makeT(script);
   const rows = stations.map(
-    (s) => html`<tr>
+    (s) => html`<tr class="${s.removed ? "removed-row" : ""}">
       <td class="num">${s.number}</td>
       <td><a href="/s/${s.id}">${tr(s.name_cyr, script)}</a>
+        ${s.is_added ? html`<span class="badge ok">${t("addedStation")}</span>` : ""}
+        ${s.removed ? html`<span class="badge warn">${t("stationRemoved")}</span>` : ""}
         ${s.is_amendment ? html`<span class="badge amend">${t("amendment")}</span>` : ""}
         ${s.address_cyr ? html`<div class="addr-sub">${tr(s.address_cyr, script)}</div>` : ""}</td>
       <td class="num">${s.seg_count}</td>
@@ -149,9 +151,21 @@ export function stationsView(
       <div class="muni-head">
         <h1>${t("stations")}</h1>
         <div class="export-bar">
+          <button id="add-station-btn" class="btn-export">+ ${t("addStation")}</button>
           <span class="export-label">${t("exportData")}:</span>
           <a class="btn-export" download href="/api/m/${muni.id}/export.geojson?script=${script}">${t("exportGeojson")}</a>
           <a class="btn-export" download href="/api/m/${muni.id}/export.kml?script=${script}">${t("exportKml")}</a>
+        </div>
+      </div>
+      <div id="add-station-form" class="add-station-form" style="display:none">
+        <h3>${t("addStationTitle")}</h3>
+        <label>${t("fieldName")}<input id="as-name" type="text" /></label>
+        <label>${t("fieldAddress")}<input id="as-address" type="text" /></label>
+        <label>${t("fieldNumber")}<input id="as-number" type="number" /></label>
+        <label>${t("fieldCoverageText")}<textarea id="as-text" rows="3"></textarea></label>
+        <div class="form-actions">
+          <button id="as-save" class="btn primary">${t("add")}</button>
+          <button id="as-cancel" class="btn">${t("cancel")}</button>
         </div>
       </div>
       <div id="muni-map"></div>
@@ -177,19 +191,26 @@ export function stationDetailView(c: Context, st: StationRow, muniName: string) 
   const name = tr(st.name_cyr, script);
   const addr = tr(st.address_cyr, script);
   const coverage = tr(st.raw_coverage_text, script);
-  const cfg = JSON.stringify({ stationId: st.id, muniId: st.municipality_id, script });
+  const cfg = JSON.stringify({
+    stationId: st.id, muniId: st.municipality_id, script,
+    isAdded: !!st.is_added, removed: !!st.removed, textOverridden: !!st.text_overridden,
+  });
   return layout(
     script,
     name,
     html`<p class="crumb"><a href="/">${t("municipalities")}</a> › <a href="/m/${st.municipality_id}">${tr(muniName, script)}</a> › #${st.number}</p>
       <div class="detail">
         <section class="panel">
-          <h1>#${st.number} · ${name}</h1>
+          <h1>#${st.number} · ${name}
+            ${st.is_added ? html`<span class="badge ok">${t("addedStation")}</span>` : ""}
+            ${st.removed ? html`<span class="badge warn">${t("stationRemoved")}</span>` : ""}</h1>
           <p class="addr">${addr}</p>
-          <div class="source">
-            <div class="source-label">${t("rawText")}</div>
+          ${st.removed ? html`<div class="removed-banner">${t("stationRemoved")}</div>` : ""}
+          <div class="source" id="source">
+            <div class="source-label">${t("rawText")}${st.text_overridden ? html` <span class="badge ok">${t("textCorrected")}</span>` : ""}</div>
             <div class="source-text">${coverage}</div>
           </div>
+          <div id="station-tools" class="station-tools"></div>
           <h2>${t("segments")}</h2>
           <div id="segments" class="segments"></div>
         </section>
@@ -224,5 +245,9 @@ function labelBundle(script: Script) {
     addedBadge: t("addedBadge"), removeAdded: t("removeAdded"),
     polygon: t("polygon"), noPolygon: t("noPolygon"), stale: t("stale"), recomputeQueued: t("recomputeQueued"),
     source: t("source"), base: t("base"), amendment: t("amendment"),
+    editText: t("editText"), textHint: t("textHint"), textCorrected: t("textCorrected"),
+    removeStation: t("removeStation"), removeStationConfirm: t("removeStationConfirm"),
+    restoreStation: t("restoreStation"), stationRemoved: t("stationRemoved"),
+    deleteStation: t("deleteStation"), addedStation: t("addedStation"),
   };
 }

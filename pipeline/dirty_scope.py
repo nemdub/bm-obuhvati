@@ -37,8 +37,20 @@ def _snapshot() -> list[dict]:
 
 
 def _rep_of_station() -> dict[int, str]:
-    st = pl.read_parquet(config.STATIONS_PARQUET).select("id", "municipality_id")
-    return {int(s): config.group_rep(str(m)) for s, m in zip(st["id"], st["municipality_id"])}
+    # Resolve from the PRISTINE snapshot (fallback: canonical) so removed stations — dropped
+    # from canonical by stage03c — still map to their municipality and stay in the recompute
+    # scope (their muni must be re-tessellated to drop them from the R2 polygon blob).
+    src = config.STATIONS_PRISTINE_PARQUET if config.STATIONS_PRISTINE_PARQUET.exists() else config.STATIONS_PARQUET
+    st = pl.read_parquet(src).select("id", "municipality_id")
+    rep = {int(s): config.group_rep(str(m)) for s, m in zip(st["id"], st["municipality_id"])}
+    # Added stations aren't in any parquet yet; resolve their synthetic ids from the export.
+    if config.ADDED_STATIONS_JSON.exists():
+        try:
+            for a in json.loads(config.ADDED_STATIONS_JSON.read_text()) or []:
+                rep[config.ADDED_STATION_BASE + int(a["id"])] = config.group_rep(str(a["municipality_id"]))
+        except json.JSONDecodeError:
+            pass
+    return rep
 
 
 def cmd_munis() -> None:

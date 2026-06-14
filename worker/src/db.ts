@@ -72,6 +72,12 @@ export interface StationRow {
   address_lat: string;
   raw_coverage_text: string;
   is_amendment: number;
+  /** Reviewer-added station (row in added_stations; id = ADDED_STATION_BASE + added id). */
+  is_added?: number;
+  /** Tombstoned via removed_stations (hidden from maps/exports; restorable). */
+  removed?: number;
+  /** Raw text comes from a station_text_overrides correction, not stage02 extraction. */
+  text_overridden?: number;
 }
 
 export interface SegmentRow {
@@ -102,6 +108,14 @@ export interface SegmentRow {
 
 /** Synthetic segment-id base for reviewer-added claims (shared with the pipeline). */
 export const ADDED_SEG_BASE = 9_000_000_000_000;
+
+/** Synthetic station-id base for reviewer-added stations (shared with the pipeline).
+ *  station id = ADDED_STATION_BASE + added_stations.id. Above ADDED_SEG_BASE's space and
+ *  far above real ids (municipality_id * 100000 + n), so the three id spaces never collide. */
+export const ADDED_STATION_BASE = 9_500_000_000_000;
+export function isAddedStationId(id: number): boolean {
+  return id >= ADDED_STATION_BASE;
+}
 
 /** Tagged street-id for a settlement (whole area) picked in the street pickers.
  *  Stored in segment_overrides.manual_street_id / station_added_segments.street_id
@@ -160,22 +174,97 @@ export async function listStations(db: D1Database, muniId: string) {
               COUNT(DISTINCT cs.id) AS seg_count,
               COALESCE(SUM(CASE WHEN cs.needs_review = 1 AND COALESCE(o.reviewed, 0) = 0
                                 THEN 1 ELSE 0 END), 0) AS review_count,
-              COALESCE(st.reviewed, 0) AS reviewed, COALESCE(st.dirty, 0) AS dirty
+              COALESCE(st.reviewed, 0) AS reviewed, COALESCE(st.dirty, 0) AS dirty,
+              CASE WHEN rm.station_id IS NOT NULL THEN 1 ELSE 0 END AS removed,
+              0 AS is_added
          FROM polling_stations ps
          LEFT JOIN coverage_segments cs ON cs.station_id = ps.id
          LEFT JOIN segment_overrides o ON o.segment_id = cs.id
          LEFT JOIN station_status st ON st.station_id = ps.id
+         LEFT JOIN removed_stations rm ON rm.station_id = ps.id
         WHERE ps.municipality_id = ?
         GROUP BY ps.id
         ORDER BY ps.number`
     )
     .bind(muniId)
-    .all();
-  return results ?? [];
+    .all<{ id: number; number: number } & Record<string, unknown>>();
+  const rows = results ?? [];
+
+  // Reviewer-added stations (worker-owned). After a recompute they also exist as real
+  // polling_stations rows (id = ADDED_STATION_BASE + added.id) — skip those to avoid
+  // duplicates; additions made since the last recompute still show live with no segments yet.
+  const existing = new Set(rows.map((r) => r.id));
+  const { results: added } = await db
+    .prepare(
+      `SELECT a.id, a.number, a.name_cyr, a.address_cyr,
+              COALESCE(st.dirty, 0) AS dirty
+         FROM added_stations a
+         LEFT JOIN station_status st ON st.station_id = ? + a.id
+        WHERE a.municipality_id = ? ORDER BY a.id`
+    )
+    .bind(ADDED_STATION_BASE, muniId)
+    .all<{ id: number; number: number | null; name_cyr: string; address_cyr: string | null; dirty: number }>();
+  for (const a of added ?? []) {
+    const synthId = ADDED_STATION_BASE + a.id;
+    if (existing.has(synthId)) continue;
+    rows.push({
+      id: synthId, number: a.number ?? 0, name_cyr: a.name_cyr, name_lat: a.name_cyr,
+      address_cyr: a.address_cyr ?? "", address_lat: a.address_cyr ?? "", is_amendment: 0,
+      seg_count: 0, review_count: 0, reviewed: 0, dirty: a.dirty, removed: 0, is_added: 1,
+    } as (typeof rows)[number]);
+  }
+  rows.sort((a, b) => Number(a.number) - Number(b.number));
+  return rows;
 }
 
-export async function getStation(db: D1Database, id: number) {
-  return db.prepare("SELECT * FROM polling_stations WHERE id = ?").bind(id).first<StationRow>();
+export async function getStation(db: D1Database, id: number): Promise<StationRow | null> {
+  if (isAddedStationId(id)) {
+    const a = await db
+      .prepare("SELECT * FROM added_stations WHERE id = ?")
+      .bind(id - ADDED_STATION_BASE)
+      .first<{ id: number; municipality_id: string; number: number | null;
+               name_cyr: string; address_cyr: string | null; raw_coverage_text: string }>();
+    if (a) {
+      return {
+        id, municipality_id: a.municipality_id, number: a.number ?? 0,
+        name_cyr: a.name_cyr, name_lat: a.name_cyr,
+        address_cyr: a.address_cyr ?? "", address_lat: a.address_cyr ?? "",
+        raw_coverage_text: a.raw_coverage_text, is_amendment: 0, is_added: 1,
+      };
+    }
+    // Fall through: a recomputed added station is a real polling_stations row.
+  }
+  const st = await db
+    .prepare(
+      `SELECT ps.*, t.raw_coverage_text AS ov_text,
+              CASE WHEN rm.station_id IS NOT NULL THEN 1 ELSE 0 END AS removed
+         FROM polling_stations ps
+         LEFT JOIN station_text_overrides t ON t.station_id = ps.id
+         LEFT JOIN removed_stations rm ON rm.station_id = ps.id
+        WHERE ps.id = ?`
+    )
+    .bind(id)
+    .first<StationRow & { ov_text: string | null; removed: number }>();
+  if (!st) return null;
+  if (st.ov_text != null) {
+    st.raw_coverage_text = st.ov_text;
+    st.text_overridden = 1;
+  }
+  return st;
+}
+
+/** Ids of stations tombstoned in a municipality — excluded from maps and exports so a
+ *  removed station disappears immediately, before its R2 polygon blob is rebuilt. */
+export async function removedStationIds(db: D1Database, muniId: string): Promise<Set<number>> {
+  const { results } = await db
+    .prepare(
+      `SELECT rm.station_id FROM removed_stations rm
+         JOIN polling_stations ps ON ps.id = rm.station_id
+        WHERE ps.municipality_id = ?`
+    )
+    .bind(muniId)
+    .all<{ station_id: number }>();
+  return new Set((results ?? []).map((r) => r.station_id));
 }
 
 export async function getSegments(db: D1Database, stationId: number): Promise<SegmentRow[]> {
