@@ -334,15 +334,21 @@ def main() -> int:
                 merged = clipped
                 n_clipped += 1
         # Despike: the per-cell octagons touch through pinch points, so unary_union (and the
-        # clip intersection) thread needle-thin zero-width slits into the boundary that render
-        # as spikes shooting toward the centre. A small morphological close (dilate then erode)
-        # heals them and repairs validity; the simplify pass below removes the rounding so the
-        # result has fewer vertices, not more. Negligible area change (~0.05%).
-        deflated = merged.buffer(config.POLYGON_DESPIKE_M, quad_segs=2).buffer(
-            -config.POLYGON_DESPIKE_M, quad_segs=2
+        # clip intersection) thread needle-thin spikes into the boundary that shoot toward the
+        # centre — inward zero-width slits AND outward needles, and they make the polygon
+        # invalid. A morphological close-then-open (dilate, erode past, dilate back) heals both
+        # kinds and repairs validity; the simplify pass below removes the rounding so the result
+        # has fewer vertices, not more. Radius stays well under the smallest real coverage
+        # feature (>=180m octagons), so it never bridges parts or fills real concavities
+        # (area change ~0.05%).
+        r = config.POLYGON_DESPIKE_M
+        smoothed = (
+            merged.buffer(r, quad_segs=2)
+            .buffer(-2 * r, quad_segs=2)
+            .buffer(r, quad_segs=2)
         )
-        if not deflated.is_empty:
-            merged = deflated
+        if not smoothed.is_empty:
+            merged = smoothed
         area = merged.area  # m^2 (UTM)
         # Adaptive simplification: whole-village polygons can exceed the D1 statement
         # budget (~50KB); escalate tolerance until the GeoJSON fits.
