@@ -44,6 +44,7 @@ rules must stay in lock‑step with stage04, which is why it gets its own docume
 | 6 | [06-claim-resolution.md](06-claim-resolution.md) | Assigning real register houses to stations: specificity, parity validation, suffix‑bounded ranges, bare‑implies‑suffix, conflicts, `бб` | `stage04_match_addresses.py` (`resolve_street_claims`) |
 | 7 | [07-review-flags.md](07-review-flags.md) | Which segments get flagged `needs_review` and the reason codes | `stage04_match_addresses.py` (finalize) |
 | 8 | [08-worker-live-preview.md](08-worker-live-preview.md) | The Worker's TypeScript mirror of matching + override resolution | `worker/src/db.ts` |
+| 9 | [09-volunteer-mapping.md](09-volunteer-mapping.md) | Mapping volunteer GeoJSON files to register municipalities (filename heuristic, district splits, Palilula collision, child‑GO fold) and the geometry‑based comparison against automated polygons | `map_volunteer_polygons.py`, `compare_volunteer.py` |
 
 ## Conventions used in these docs
 
