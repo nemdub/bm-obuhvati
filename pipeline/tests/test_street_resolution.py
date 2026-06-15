@@ -181,6 +181,25 @@ class TestSettlementClaim:
         assert method == "settlement"
         assert sid == "st2" and amb == ["st3"]
 
+    def test_naseljeno_mesto_prefix_claims_settlement(self):
+        # Vladimirci writes every station as "насељено место <village>". Strip the marker and
+        # claim the settlement by name (all its streets), even though no street matches.
+        idx = make_index(
+            {"S1": {"st1": "Прва"}, "S2": {"st2": "Друга", "st3": "Трећа"}},
+            {"S1": "Прво Село", "S2": "Белотић"},
+        )
+        sid, method, score, amb = S4.resolve_street("насељено место Белотић", MUNI, "S1", idx)
+        assert method == "settlement"
+        assert sid == "st2" and amb == ["st3"]
+
+    def test_naselje_prefix_still_claims_settlement(self):
+        # The pre-existing bare "насеље <village>" marker keeps working.
+        idx = make_index(
+            {"S1": {"st1": "Прва"}, "S2": {"st2": "Друга"}},
+            {"S1": "Прво Село", "S2": "Белосавци"},
+        )
+        assert S4.resolve_street("насеље Белосавци", MUNI, "S1", idx)[:2] == ("st2", "settlement")
+
 
 class TestLocality:
     """Sub-locality / hamlet (заселак) claim (§5.x): the register encodes a locality with no

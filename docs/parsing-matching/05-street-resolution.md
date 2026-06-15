@@ -234,10 +234,17 @@ street anywhere in that muni — or scope the fix to a single station via the UI
 
 ## 5.12 Settlement‑name (village) claims (step 12, last resort)
 
-**Rule:** some stations name a whole **settlement** instead of streets (`Белосавци` in
-Topola). If `primary` (with a leading `НАСЕЉЕ ` stripped) matches a settlement name in the
-muni, claim **every street** of that settlement (first id anchor, rest in `ambiguous_ids`).
+**Rule:** some stations name a whole **settlement** instead of streets — either bare
+(`Белосавци` in Topola) or with an explicit marker. `_strip_settlement_prefix` removes a
+leading **`НАСЕЉЕ `** or **`НАСЕЉЕНО МЕСТО `** (the latter is how every Vladimirci station is
+written: `насељено место Белотић`). If the de‑prefixed `primary` matches a settlement name in
+the muni, claim **every street** of that settlement (first id anchor, rest in `ambiguous_ids`).
 Method `settlement`, score 85, reason `settlement_claim:НАЗИВ` (flagged).
+
+> The marker must be the **nominative** whole‑settlement form. `део насељеног места <X>`
+> ("**part of** settlement X", genitive) is deliberately **not** stripped: it claims only a
+> hamlet/`мала` of X (spelled out in the following clauses), so claiming the whole settlement
+> would over‑cover — those segments stay unresolved for review.
 
 This is the **last resort** — tried only when nothing matched anywhere in the municipality.
 Earlier placement hijacked cross‑settlement street matches.
@@ -333,3 +340,56 @@ flagged for review.
 > settlement, and `РЗАВСКА` exists in several settlements, so the ladder returns
 > `ambiguous` (nothing linked). The proximity pass picks the `РЗАВСКА` in `АРИЉЕ`, the
 > settlement nearest the station's other matched streets, and links it.
+
+## 5.16 OSM (Nominatim) fallback — last resort, draws geometry the register lacks
+
+**When it fires.** After the proximity pass, for the segments still `none` / `ambiguous` —
+plus the **weak‑substring `fuzzy`** matches described below. These name a street or settlement
+the register **cannot place at all** — not a spelling the ladder missed, but a locality with no
+own naselje and no clean street encoding. Both kinds fall back: streets and settlements/places.
+
+**Weak‑substring fuzzy (`_weak_substring_fuzzy`).** A single‑word coverage can be caught by
+WRatio's partial ratio as a **non‑leading substring** of a longer street — `Жарковац`
+fuzzy‑matches `БРАНКА РАДИЧЕВИЋА ЖАРКОВАЦ`, linking *one* street of a whole hamlet. When the
+doc token is a single word that is a non‑leading word of the matched street's name, the segment
+is routed to the OSM fallback (place query only). On a **hit** the wrong fuzzy claim is pulled
+and the OSM place polygon becomes the coverage; on a **miss** the fuzzy match is kept untouched.
+This is what makes the worked example below resolve.
+
+**Accepting only real places/streets.** A bounded muni search returns *some* object for any
+generic token (`ЗГРАДА`→building, `СТАДИОН`→stadium, `ЦИГЛАНА`→brickworks, `1 УПРАВА`→a single
+house), so OSM hits are filtered by `class`/`type`: settlements accept `place` (hamlet, village,
+suburb, locality, …) or `boundary`=administrative; streets accept `highway` (minus footway/path/
+…). Everything else is rejected. The geocoder asks for the top 5 candidates and keeps the first
+that passes, so a spurious top hit doesn't mask a real match just below it.
+
+**Worked example — Sombor #20, „Жарковац, Задружна".** `Задружна` resolves to a Sombor
+street; `Жарковац` does not. `Жарковац` is a **hamlet of Sombor** the register stores only as
+*suffixes* on a few streets (`ПАРТИЗАНСКА-ЖАРКОВАЦ`, `БРАНКА РАДИЧЕВИЋА ЖАРКОВАЦ`, …), several
+already **retired** with no live addresses — so 5.15's locality rule (which keys on a *prefix*)
+doesn't fire and there are no points to tessellate. The only register **settlement** polygon
+literally named `ЖАРКОВАЦ` sits in **Ruma, ~150 km away** — drawing it would be flat wrong.
+
+**Municipality scoping is the crux.** We geocode the name against OpenStreetMap
+(`/search`, `polygon_geojson=1`, `countrycodes=rs`) **bounded to the station's municipality
+bbox** (`viewbox` + `bounded=1`, from `load_muni_boundaries()`) plus a structured
+`city`/`county` = muni name. That returns *Sombor's* Жарковац, not Ruma's. The result geometry
+is then **clipped to the municipality boundary** as a second guard.
+
+**Geometry is the coverage.** There is no register street id and no address links — stage05
+draws the OSM geometry directly (unioned with any point-Voronoi cells the station also has),
+exactly like a whole-settlement claim. An OSM **area** is used as-is; a **street LineString**
+is buffered by `OSM_STREET_BUFFER_M`, a bare **place node** by `OSM_POINT_BUFFER_M`. Method
+`osm`, confidence 0.5, reason `osm_fallback` — **always flagged for review**, because a
+buffered point/line is an approximation a human should confirm or redraw.
+
+**Caching (committed) & offline mode.** Every Nominatim response — hit *or* miss — is cached
+in `data/osm_cache.json`, keyed `kind|muni_id|normalized_name`, and **committed to the repo**,
+so a recompute never re-queries a name and coverage stays reproducible across clean checkouts /
+CI. Public Nominatim is rate-limited to ≤1 req/s with a descriptive User-Agent (`NOMINATIM_URL`
+points at a self-hosted instance to lift the limit). `OSM_OFFLINE=1` runs **cache-only** — a
+miss returns nothing without touching the network — and the matcher's unit tests run that way,
+so they never hit OSM. To re-try a name OSM lacked, delete its key from the cache file.
+
+**Incremental `--municipalities`** merges `osm_claims.parquet` the same way the
+settlement-claim map is merged: drop the affected stations' rows, append the fresh ones.

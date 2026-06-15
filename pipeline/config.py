@@ -93,6 +93,23 @@ PROXIMITY_RADIUS_FLOOR_M = 400.0    # but never tighter than this (dense city bl
 PROXIMITY_RADIUS_CAP_M = 3000.0     # nor wider than this (sprawling rural stations)
 STREET_FUZZY_PROX_MIN = 90          # name-similarity cutoff for the proximity fuzzy fallback
 
+# ── OSM (Nominatim) fallback (stage04) ──────────────────────────────────────
+# Last resort, after the proximity pass: a street/settlement the register can't place at all
+# (e.g. the Sombor hamlet "Жарковац", which the register encodes only as suffixes on retired,
+# address-less streets) is geocoded against OpenStreetMap, scoped to the station's
+# municipality, and its geometry is drawn as the coverage. Responses are cached on disk and
+# committed (data/osm_cache.json) so a recompute never re-queries the same name. See
+# pipeline/common/osm.py and docs/parsing-matching/05-street-resolution.md.
+OSM_CACHE_JSON = DATA_DIR / "osm_cache.json"            # committed Nominatim response cache
+OSM_CLAIMS_PARQUET = ARTIFACTS_DIR / "osm_claims.parquet"  # station_id -> OSM coverage geometry (UTM WKT)
+# Public Nominatim by default; point NOMINATIM_URL at a self-hosted instance to avoid the
+# public service's 1 req/s policy. A descriptive User-Agent is required by that policy.
+NOMINATIM_URL = "https://nominatim.openstreetmap.org"
+NOMINATIM_USER_AGENT = "bm-obuhvati/1.0 (https://github.com/dubravac-nemanja/bm-obuhvati; polling-station coverage)"
+NOMINATIM_RATE_LIMIT_S = 1.0        # min seconds between live calls (public policy: <=1 req/s)
+OSM_STREET_BUFFER_M = 40.0          # half-width buffer for a geocoded street LineString
+OSM_POINT_BUFFER_M = 300.0          # radius buffer for a geocoded place node with no area
+
 # ── Manual overrides for doc filename -> municipality (Latin register name). ──
 # Auto-matching in stage02 handles most files; add corrections here when the
 # fuzzy match is wrong. Keys are the on-disk filenames; values are the register

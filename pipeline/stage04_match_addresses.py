@@ -13,8 +13,13 @@ register street. Flagged 'proximity' for review. Incremental --municipalities mo
 all segments of the affected group_rep munis and proximity is muni-scoped, so its
 'already claimed' snapshot and per-station anchors stay complete within scope.
 
+A final OSM (Nominatim) fallback geocodes the few segments still unresolved against
+OpenStreetMap, scoped to the station's municipality, and emits the returned geometry as the
+coverage (method 'osm', always flagged for review). Responses are cached and committed
+(data/osm_cache.json) so a recompute never re-queries; OSM_OFFLINE=1 runs cache-only.
+
   reads:  segments_amended.parquet, streets/settlements/addresses/stations parquet
-  writes: segments.parquet (final, schema-ready), links.parquet
+  writes: segments.parquet (final, schema-ready), links.parquet, osm_claims.parquet
 
 Usage:
   python3 stage04_match_addresses.py
@@ -42,6 +47,8 @@ from rapidfuzz import fuzz, process
 from scipy.spatial import cKDTree
 
 import config
+from common import osm
+from common.boundaries import load_muni_boundaries
 from common.coverage_parse import interval_parity
 from common.normalize import genitive_variants, normalize_street, suffix_rank
 
@@ -399,6 +406,35 @@ _ALIASES = {
 }
 
 
+# Explicit "this clause names a whole SETTLEMENT, not a street" markers, in normalized form.
+# A coverage like "насељено место Белотић" (every Vladimirci station writes this way) or
+# "насеље Белосавци" claims the settlement by name. Longest prefix first so "НАСЕЉЕНО МЕСТО"
+# is stripped in full rather than leaving a stray "НО МЕСТО …" behind a bare "НАСЕЉЕ" match.
+_SETTLEMENT_PREFIXES = ("НАСЕЉЕНО МЕСТО ", "НАСЕЉЕ ")
+
+
+def _strip_settlement_prefix(name: str) -> str:
+    for p in _SETTLEMENT_PREFIXES:
+        if name.startswith(p):
+            return name[len(p):].strip()
+    return name
+
+
+def _weak_substring_fuzzy(rec, street_meta) -> bool:
+    """A 'fuzzy' match that is really a single-word coverage caught as a NON-leading substring
+    of a longer register street — the Sombor „Жарковац" → „БРАНКА РАДИЧЕВИЋА ЖАРКОВАЦ" trap:
+    the hamlet token only appears as the street's last word, so WRatio's partial ratio links
+    one street of a whole hamlet. These are routed to the OSM fallback (which prefers a real
+    place polygon), but only on a hit — on a miss the fuzzy match is kept."""
+    if rec["method"] != "fuzzy" or not rec["street_id"]:
+        return False
+    primary = _strip_settlement_prefix(normalize_street(_PAREN_RE.sub(" ", rec["street_raw"])))
+    if not primary or " " in primary:  # single-token coverage only
+        return False
+    toks = street_meta.get(rec["street_id"], {}).get("name_norm", "").split()
+    return len(toks) > 1 and primary in toks and toks[0] != primary
+
+
 def resolve_street(street_raw, muni, settlement_id, idx, settlement_inferred=False
                    ) -> tuple[str | None, str, float, list[str]]:
     """Resolve a street name to a register street id, scoped to the station's settlement
@@ -504,11 +540,14 @@ def resolve_street(street_raw, muni, settlement_id, idx, settlement_inferred=Fal
         hit = _fuzzy_muni_unique(primary, muni_scope, config.STREET_FUZZY_MUNI_MIN)
         if hit:
             return hit[0], "fuzzy", hit[1], []
-    # Village-name coverage: some stations name a whole SETTLEMENT instead of streets
-    # ("Белосавци" in Topola). If the name matches a settlement in the municipality,
-    # LAST RESORT — only when no street matches anywhere in the municipality (otherwise it hijacks cross-settlement street matches); claim every street in it (extra ids ride in the 4th slot, method 'settlement').
+    # Village-name coverage: some stations name a whole SETTLEMENT instead of streets, either
+    # bare ("Белосавци" in Topola) or with an explicit marker ("насељено место Белотић" — the
+    # whole of Vladimirci; "насеље Белосавци"). If the (de-prefixed) name matches a settlement
+    # in the municipality, LAST RESORT — only when no street matches anywhere in the
+    # municipality (otherwise it hijacks cross-settlement street matches); claim every street in
+    # it (extra ids ride in the 4th slot, method 'settlement').
     setts_by_muni, sett_to_streets = idx[4], idx[7]
-    sett_key = primary[len("НАСЕЉЕ "):] if primary.startswith("НАСЕЉЕ ") else primary
+    sett_key = _strip_settlement_prefix(primary)
     for s_id, s_norm in setts_by_muni.get(muni, []):
         if s_norm == sett_key:
             streets = sett_to_streets.get(s_id, [])
@@ -623,6 +662,91 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
             parity_unconfirmed.add(c["seg_id"])
 
     return assigned, conflicts, parity_unconfirmed
+
+
+def osm_fallback_pass(pending, station_muni, muni_bounds, muni_name,
+                      claims_by_street, street_meta) -> list[dict]:
+    """Geocode unresolved (or weakly-matched) segments against OpenStreetMap, emit geometry.
+
+    Two kinds of segment fall here:
+    - 'none' / 'ambiguous' — a street or settlement the register cannot place at all (a hamlet
+      stored only as suffixes on retired, address-less streets, or a locality with no naselje);
+    - a weak-substring 'fuzzy' match (`_weak_substring_fuzzy`) — a single-word hamlet caught as
+      a non-leading substring of a longer street (the Sombor „Жарковац" → „БРАНКА РАДИЧЕВИЋА
+      ЖАРКОВАЦ" trap). These prefer a real OSM place polygon; on a HIT their (wrong) register
+      claim is pulled, on a MISS the fuzzy match is kept untouched.
+
+    For each we geocode the name SCOPED to the station's municipality (its bbox bounds the
+    search, so we get this muni's place, not a same-named one ~150 km away in Ruma), clip the
+    returned geometry to the municipality boundary, and return it as an OSM coverage claim that
+    stage05 draws directly (like a whole-settlement claim). Matched seg recs become method='osm'
+    in place; responses are cached by the osm module (committed data/osm_cache.json).
+    """
+    import shapely
+    from shapely import wkt as shapely_wkt
+    from shapely.ops import transform as shp_transform
+    from pyproj import Transformer
+
+    to_wgs = Transformer.from_crs(config.UTM_34N, config.WGS84, always_xy=True)
+    viewbox_cache: dict[str, tuple[float, float, float, float] | None] = {}
+
+    def _viewbox(mid: str):
+        # Municipality bbox in WGS84 (lon/lat) for the Nominatim viewbox; computed once.
+        if mid not in viewbox_cache:
+            b = muni_bounds.get(mid)
+            if b is None:
+                viewbox_cache[mid] = None
+            else:
+                wgs = shp_transform(lambda xs, ys: to_wgs.transform(xs, ys), b)
+                viewbox_cache[mid] = wgs.bounds  # (min_lon, min_lat, max_lon, max_lat)
+        return viewbox_cache[mid]
+
+    osm_claims: list[dict] = []
+    for r in pending:
+        mid = station_muni.get(r["station_id"])
+        if mid is None or mid not in muni_name:
+            continue
+        name = _strip_settlement_prefix(normalize_street(_PAREN_RE.sub(" ", r["street_raw"])))
+        if not name:
+            continue
+        vb = _viewbox(mid)
+        # A weak-substring fuzzy match means the doc word is really a PLACE the register lacks —
+        # only accept a place/settlement here (a street query would just find another street).
+        weak_fuzzy = _weak_substring_fuzzy(r, street_meta)
+        kinds = ("settlement",) if weak_fuzzy else ("settlement", "street")
+        result = kind = None
+        for k in kinds:
+            hit = osm.geocode(k, name, mid, muni_name[mid], vb)
+            if hit:
+                result, kind = hit, k
+                break
+        if result is None:
+            continue  # miss: 'none'/'ambiguous' stay unresolved, weak-fuzzy keeps its match
+        geom = osm.to_coverage_geom(result)
+        if geom is None or geom.is_empty:
+            continue
+        clip = muni_bounds.get(mid)
+        if clip is not None:
+            geom = shapely.make_valid(geom.intersection(clip).buffer(0))
+            if geom.is_empty:
+                continue
+        # Hit: if this was a (wrong) fuzzy street match, pull its already-emitted claims so the
+        # OSM geometry — not the substring street's addresses — becomes the coverage.
+        old_sid = r["street_id"]
+        if old_sid and old_sid in claims_by_street:
+            kept = [c for c in claims_by_street[old_sid] if c["seg_id"] != r["id"]]
+            if kept:
+                claims_by_street[old_sid] = kept
+            else:
+                del claims_by_street[old_sid]
+        osm_claims.append({
+            "station_id": r["station_id"], "segment_id": r["id"], "kind": kind,
+            "query": name, "osm_type": str(result.get("osm_type")),
+            "osm_id": str(result.get("osm_id")), "wkt": shapely_wkt.dumps(geom),
+        })
+        # Resolved by OSM: no register street/address links, the geometry is the coverage.
+        r["method"], r["score"], r["amb_ids"], r["street_id"] = "osm", 50.0, [], None
+    return osm_claims
 
 
 def main() -> int:
@@ -862,6 +986,23 @@ def main() -> int:
     if n_prox:
         print(f"  proximity matches: {n_prox:,} ({n_disamb:,} disambiguated)")
 
+    # OSM (Nominatim) fallback: geocode the few still-unresolved segments against OpenStreetMap,
+    # scoped to the station's municipality, and emit the returned geometry as the coverage (see
+    # osm_fallback_pass). Skipped when offline with an empty cache (no network and nothing to
+    # replay), so the offline tests never touch it.
+    osm_claims: list[dict] = []
+    osm_pending = [r for r in seg_recs
+                   if r["method"] in ("none", "ambiguous") or _weak_substring_fuzzy(r, street_meta)]
+    if osm_pending and not (osm._offline() and not config.OSM_CACHE_JSON.exists()):
+        muni_bounds = load_muni_boundaries()  # {muni_id: polygon (UTM34N)}
+        m = pl.read_parquet(config.MUNICIPALITIES_PARQUET)
+        muni_name = dict(zip(m["id"], m["name_lat"]))
+        osm_claims = osm_fallback_pass(osm_pending, station_muni, muni_bounds, muni_name,
+                                       claims_by_street, street_meta)
+        osm.flush_cache()
+        if osm_claims:
+            print(f"  OSM fallback matches: {len(osm_claims):,}")
+
     # Pass 2: resolve each street; collect links + per-segment flags.
     links: list[dict] = []
     matched_seg_ids: set[int] = set()
@@ -912,6 +1053,11 @@ def main() -> int:
                 for sid in r["amb_ids"] if sid in street_meta
             })
             reasons.append("ambiguous:" + "|".join(n for n in setts if n))
+        elif method == "osm":
+            # Geocoded against OpenStreetMap — no register street; the OSM geometry is drawn as
+            # the coverage in stage05. Always surfaced so the reviewer confirms the place/extent.
+            conf = 0.5
+            reasons.append("osm_fallback")
         elif r["street_id"] is None:
             conf = 0.2
             reasons.append("street_unresolved")
@@ -961,7 +1107,8 @@ def main() -> int:
             reasons.append("unknown_kind")
         if r["source"] == "amendment":
             reasons.append("amendment")
-        if not parsed.get("whole") and r["id"] not in matched_seg_ids and not r.get("old_name_dup"):
+        if (not parsed.get("whole") and r["id"] not in matched_seg_ids
+                and not r.get("old_name_dup") and method != "osm"):
             reasons.append("no_match")
         if r["id"] in conflict_map:
             # Parameterized code: conflict:<opposing station numbers joined by |>.
@@ -992,11 +1139,16 @@ def main() -> int:
     sett_claims_df = pl.DataFrame(
         sett_claims, schema={"station_id": pl.Int64, "settlement_id": pl.String}
     ).unique()
+    osm_claims_df = pl.DataFrame(osm_claims, schema={
+        "station_id": pl.Int64, "segment_id": pl.Int64, "kind": pl.String,
+        "query": pl.String, "osm_type": pl.String, "osm_id": pl.String, "wkt": pl.String,
+    })
 
     if municipalities is None:
         pl.DataFrame(out_segs, infer_schema_length=None).write_parquet(config.SEGMENTS_PARQUET)
         pl.DataFrame(links, infer_schema_length=None).write_parquet(config.LINKS_PARQUET)
         sett_claims_df.write_parquet(config.STATION_SETT_CLAIMS_PARQUET)
+        osm_claims_df.write_parquet(config.OSM_CLAIMS_PARQUET)
     else:
         # Merge into the complete parquets: drop every affected station's old segments and
         # links, then append the freshly matched ones (segment ids preserved). Untouched
@@ -1024,6 +1176,15 @@ def main() -> int:
                 config.STATION_SETT_CLAIMS_PARQUET)
         else:
             sett_claims_df.write_parquet(config.STATION_SETT_CLAIMS_PARQUET)
+        # OSM-claim geometry: drop affected stations' rows, append the fresh ones.
+        if config.OSM_CLAIMS_PARQUET.exists():
+            prev_osm = pl.read_parquet(config.OSM_CLAIMS_PARQUET)
+            osm_parts = [prev_osm.filter(~pl.col("station_id").is_in(affected))]
+            if osm_claims_df.height:
+                osm_parts.append(osm_claims_df.select(prev_osm.columns))
+            pl.concat(osm_parts, how="vertical_relaxed").write_parquet(config.OSM_CLAIMS_PARQUET)
+        else:
+            osm_claims_df.write_parquet(config.OSM_CLAIMS_PARQUET)
 
     n_review = sum(x["needs_review"] for x in out_segs)
     n_unres = sum(1 for x in out_segs if x["street_id"] is None)

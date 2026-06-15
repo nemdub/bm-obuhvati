@@ -7,7 +7,7 @@ the cells belonging to each station. Unmatched points get an "unassigned" sentin
 coverage gaps remain visible. A station spanning settlements is unioned across them.
 Output polygons are reprojected to WGS84 GeoJSON.
 
-  reads:  addresses.parquet, links.parquet
+  reads:  addresses.parquet, links.parquet, station_settlement_claims.parquet, osm_claims.parquet
   writes: polygons.parquet (station_id, geojson, area_m2, point_count, computed_at)
 
 Usage:
@@ -311,6 +311,28 @@ def main() -> int:
             geoms = [sbound[s] for s in grp["settlement_id"].to_list() if s in sbound]
             if geoms:
                 claim_geom[int(sid)] = geoms[0] if len(geoms) == 1 else unary_union(geoms)
+
+    # OSM-fallback coverage: a segment whose street/settlement the register can't place was
+    # geocoded against OpenStreetMap in stage04 (data/osm_claims.parquet, UTM WKT, already
+    # clipped to the municipality). Union it into the station's claim geometry exactly like a
+    # whole-settlement claim, so it merges with any point-Voronoi cells the station also has.
+    if config.OSM_CLAIMS_PARQUET.exists():
+        oc = pl.read_parquet(config.OSM_CLAIMS_PARQUET)
+        if affected is not None:
+            oc = oc.filter(pl.col("station_id").is_in(list(affected)))
+        for (sid,), grp in oc.group_by("station_id"):
+            geoms = []
+            for w in grp["wkt"].to_list():
+                try:
+                    g = shapely.make_valid(shapely.from_wkt(w))
+                except Exception:
+                    continue
+                if not g.is_empty:
+                    geoms.append(g)
+            if geoms:
+                sid = int(sid)
+                geoms += [claim_geom[sid]] if sid in claim_geom else []
+                claim_geom[sid] = geoms[0] if len(geoms) == 1 else unary_union(geoms)
 
     rows: list[dict] = []
     now = datetime.now(timezone.utc).isoformat()

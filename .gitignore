@@ -1,5 +1,10 @@
-# Raw + derived data (large; not version controlled)
-data/
+# Raw + derived data (large; not version controlled). Glob the CONTENTS (not the dir) so the
+# one committed exception below can be re-included — gitignore can't re-add a file whose
+# parent directory is itself excluded.
+data/*
+# ...except the Nominatim (OSM) fallback cache: small, committed so a recompute never
+# re-queries OpenStreetMap and coverage stays reproducible across checkouts / CI.
+!data/osm_cache.json
 pipeline/artifacts/
 
 # Python
