@@ -143,6 +143,44 @@ class TestSuffixBounds:
         assert _winners(assigned) == {1: 100, 2: 100}
 
 
+# ── Bare bound implies suffixes, but yields to an explicit suffix claim ─────────
+class TestImpliedSuffixYields:
+    def test_bare_bound_yields_60a_to_explicit_range(self):
+        # Live case (Матије Гупца): even 2-60 (bare 60) vs even 60а-80.
+        # Bare 60 -> the 2-60 station; 60а -> the 60а-80 station; NO conflict.
+        rows = [(1, 60, ""), (2, 60, "А")]
+        claims = [_interval(10, 41, 2, 60, "even"),
+                  _interval(20, 38, 60, 80, "even", losfx="А")]
+        assigned, conflicts, _ = S4.resolve_street_claims(claims, rows)
+        assert _winners(assigned) == {1: 41, 2: 38}
+        assert conflicts == {}
+
+    def test_two_bare_ranges_still_conflict_on_suffixed_house(self):
+        # Both bounds bare -> both imply 60а equally -> genuine conflict, still flagged.
+        rows = [(1, 60, "А")]
+        claims = [_interval(10, 100, 2, 60, "even"),
+                  _interval(20, 200, 40, 60, "even")]
+        assigned, conflicts, _ = S4.resolve_street_claims(claims, rows)
+        assert assigned == {}
+        assert conflicts == {10: {200}, 20: {100}}
+
+    def test_uncontested_implied_suffix_still_assigned(self):
+        # Lone bare range still picks up the suffixed house (no competitor).
+        rows = [(1, 60, ""), (2, 60, "А")]
+        claims = [_interval(10, 100, 2, 60, "even")]
+        assigned, conflicts, _ = S4.resolve_street_claims(claims, rows)
+        assert _winners(assigned) == {1: 100, 2: 100}
+        assert conflicts == {}
+
+    def test_exact_single_still_beats_bare_range(self):
+        # An explicit single 60а (spec 3) beats the bare range's implied 60а.
+        rows = [(1, 60, "А")]
+        claims = [_interval(10, 100, 2, 60, "even"), _single(20, 200, 60, "А")]
+        assigned, conflicts, _ = S4.resolve_street_claims(claims, rows)
+        assert _winners(assigned) == {1: 200}
+        assert conflicts == {}
+
+
 # ── bez_broja / NULL houses ──────────────────────────────────────────────────
 class TestBezBroja:
     def test_bb_claims_only_null_houses(self):

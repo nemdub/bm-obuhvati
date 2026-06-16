@@ -20,6 +20,7 @@ A claim is one of these kinds; higher specificity wins a contested house:
 | bare single → suffixed | `SPEC_IMPLIED_SINGLE` | 2 | `5` also claims `5а/5б/…` |
 | interval | `SPEC_INTERVAL` | 1 | houses in `[lo,hi]` (parity/suffix‑bounded) |
 | `бб` (bez_broja) | `SPEC_BEZ_BROJA` | 1 | only `house_num IS NULL` houses |
+| interval, implied suffix | `SPEC_INTERVAL_IMPLIED_SUFFIX` | 0.5 | a *suffixed* house reached only via a **bare** range bound (e.g. `2‑60` → `60а`) — yields to an explicit suffix claim (see §6.3) |
 | whole street | `SPEC_WHOLE` | 0 | every house incl. NULL‑house |
 | settlement (village) | `SPEC_SETT_WHOLE` | −1 | every street of a settlement |
 
@@ -64,6 +65,27 @@ A house at `num`/`suffix` is in an interval claim iff **all** hold:
   excluded).
 - An **empty** bound suffix keeps historical behavior: **all** suffixed variants at that
   number match.
+
+### Bare bound implies suffixes, but yields to an explicit suffix claim (`_interval_spec`)
+
+The empty‑bound rule above means a bare range `2-60` *covers* `60а`. But when **another
+station** names that suffix explicitly — an exact single `60а`, or a suffix‑bounded range edge
+like `60а-80` (`losfx="А"`) — the bare range should **yield** `60а`, not raise a spurious
+`conflict` ("Адресе се преклапају…").
+
+`_interval_spec(num, suf, claim)` demotes the implied match: a **suffixed** house (`suf != ""`)
+matched only because a **bare** bound implies all suffixes (no `losfx`/`hisfx` pinning that
+edge — interior houses count as implied too) scores `SPEC_INTERVAL_IMPLIED_SUFFIX = 0.5`
+instead of `SPEC_INTERVAL = 1`. Membership in the interval is unchanged (`_bounds_ok` still
+returns True) — only the *ranking* of who wins the house changes:
+
+- exact single `60а` (spec 3) or suffix‑bounded edge `60а-80` (spec 1) **beats** the bare
+  range's implied `60а` (spec 0.5).
+- a **lone** bare range still picks up `60а` (uncontested, 0.5 is the max).
+- **two** bare ranges both implying `60а` tie at 0.5 → genuine `conflict`, still flagged.
+
+Bare houses (`suf == ""`) always score `SPEC_INTERVAL`, so e.g. plain `60` stays with the
+`2-60` station while `60а` goes to the `60а-80` station.
 
 ### Parity element source (`_iv_parity`)
 

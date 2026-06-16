@@ -576,6 +576,17 @@ def _bounds_ok(num: int, suf: str, c: dict) -> bool:
     return True
 
 
+def _interval_spec(num: int, suf: str, c: dict) -> float:
+    """Specificity of an interval match for one house. A suffixed house matched only
+    because a bare range bound implies all suffixes (no losfx/hisfx pinning that edge)
+    is demoted, so '2-60' yields 60а to a station that lists '60а-80'. The house has
+    already passed _bounds_ok, so a suffix sitting at an edge with a suffix bound set is
+    explicitly covered → full spec; interior and bare-bound suffixed houses are implied."""
+    if suf and not ((num == c["lo"] and c.get("losfx")) or (num == c["hi"] and c.get("hisfx"))):
+        return SPEC_INTERVAL_IMPLIED_SUFFIX
+    return SPEC_INTERVAL
+
+
 # Claim specificity (higher wins). An exact single (number + suffix) beats a bare number
 # implying its suffixed variants, which beats a range, which beats a whole street. The
 # implied level lets "Пушкинов трг 5" also claim 5а/5б/... unless another station lists
@@ -583,6 +594,10 @@ def _bounds_ok(num: int, suf: str, c: dict) -> bool:
 SPEC_EXACT_SINGLE = 3
 SPEC_IMPLIED_SINGLE = 2
 SPEC_INTERVAL = 1
+# A suffixed house matched ONLY because a bare range bound implies all its suffixes
+# (e.g. "2-60" reaching 60а) yields to a claim that names that suffix explicitly — an
+# exact single (spec 3) or a suffix-bounded range edge like "60а-80" (spec SPEC_INTERVAL).
+SPEC_INTERVAL_IMPLIED_SUFFIX = 0.5
 # bez_broja ("бб"): claims a street's no-number (house_num IS NULL) houses. It only ever
 # competes with whole/sett_whole for those NULL-house addresses (intervals/singles need a
 # number), so an explicit "бб" outranks a generic whole-street claim there.
@@ -626,7 +641,7 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
                 continue  # interval / single need a house number
             elif k == "interval":
                 if c["lo"] <= num <= c["hi"] and _parity_ok(num, c["parity"]) and _bounds_ok(num, suf, c):
-                    cands.append((SPEC_INTERVAL, c))
+                    cands.append((_interval_spec(num, suf, c), c))
             elif c["num"] == num:
                 if c["suffix"] == suf:
                     cands.append((SPEC_EXACT_SINGLE, c))          # exact (incl. bare matching bare)
