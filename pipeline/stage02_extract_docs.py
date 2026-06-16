@@ -37,7 +37,7 @@ AMENDMENT_RE = re.compile(r"\b(izmena|izmene|dopuna|dopune|ispravka|ispravke)\b"
 MILITARY_RE = re.compile(r"vojsk", re.IGNORECASE)
 HEADER_HINT = "НАЗИВ ГЛАСАЧКОГ МЕСТА"
 COUNT_RE = re.compile(r"одре[ђd]\w*\s+се\s+(\d+)\s+гласачк")
-INT_LINE_RE = re.compile(r"^(\d+)\.?$")  # station number, optionally with a trailing period
+INT_LINE_RE = re.compile(r"^(\d+)\s*\.*\s*$")  # station number with any trailing periods (e.g. "23", "23.", "23..")
 # End of the polling-station table: the resolution's closing section ("II ..." with the
 # "Ово решење доставити..." boilerplate, signatures, page markers). Without this, the last
 # station in a .doc absorbs all trailing text (there is no next number to stop it).

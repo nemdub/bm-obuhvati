@@ -65,6 +65,20 @@ class TestRowsFromDoc:
         rows = S2.rows_from_doc(txt)
         assert rows[0][1] == 1
 
+    def test_double_period_number_still_delimits(self):
+        # Pančevo bug: station 23 was typed "23.." (two periods) and got merged into 22.
+        # Any number of trailing periods must still start a new station.
+        txt = "\n".join([
+            HEADER,
+            "22", "Дом 22", "Друга 2", "Друга 2-8",
+            "23..", "ОШ Вук", "Прва 1", "Прва 1-10",
+        ])
+        rows = S2.rows_from_doc(txt)
+        assert rows == [
+            (None, 22, "Дом 22", "Друга 2", "Друга 2-8"),
+            (None, 23, "ОШ Вук", "Прва 1", "Прва 1-10"),
+        ]
+
     def test_coverage_joins_extra_lines(self):
         txt = "\n".join([HEADER, "1", "ОШ Вук", "Адреса", "Прва 1-10", "Друга 2-8"])
         rows = S2.rows_from_doc(txt)
