@@ -83,7 +83,7 @@ app.get("/api/s/:id/segments", async (c) => {
             // For name-based matches, spell out document spelling -> matched register name
             // (the card title shows the resolved name, so the discrepancy isn't otherwise visible).
             if (
-              (base === "fuzzy" || base === "muni_fallback" || base === "alias" || base === "proximity") &&
+              (base === "fuzzy" || base === "muni_fallback" || base === "alias" || base === "proximity" || base === "abbrev") &&
               s.street_id
             ) {
               const matched = (script === "lat" ? s.street_name_lat : s.street_name_cyr) ?? "";

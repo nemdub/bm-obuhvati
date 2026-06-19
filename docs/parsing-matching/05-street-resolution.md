@@ -134,6 +134,7 @@ Tried in order; first hit wins. `primary` = normalized name with any parenthetic
 | 7a | `_locality_streets` (single word → заселак/locality cluster) | `locality` (flagged) | **settlement only** |
 | 8 | `_fuzzy(primary)` | `fuzzy` (flagged) | **settlement only** |
 | 9 | `_token_subset(primary)` | `fuzzy` (flagged) | settlement |
+| 9a | `_initial_abbrev_match` (initial / title abbreviation) | `abbrev` (flagged) | **settlement only** |
 | 10 | muni exact (`primary`, then `alt`) | `muni_fallback` / `ambiguous` / `exact` | muni |
 | 11 | `_fuzzy_muni_unique` | `fuzzy` (flagged) | **muni, only if no home settlement OR an inferred town** |
 | 12 | settlement‑name (village) claim | `settlement` (flagged) | muni, **last resort** |
@@ -250,6 +251,40 @@ matched in settlement scope (or muni‑unique).
 (doc has ≥ 2 words) **and** shares the same **last** word (surname), and is strictly longer.
 Ties are rejected. `ВУКА КАРАЏИЋА` ⊂ `ВУКА СТЕФАНОВИЋА КАРАЏИЋА`. WRatio under‑scores these
 (length penalty ~85), so they need their own rule. Returned as `fuzzy` (flagged).
+
+## 5.10a Initial / title abbreviation (`_initial_abbrev_match`, step 9a)
+
+**Rule:** some docs abbreviate a **given name to its initial** (and a title to its short form),
+spelling out only the surname: `М.Пупина` for `МИХАЈЛА ПУПИНА`, `Ф.Вишњића` for `ФИЛИПА
+ВИШЊИЋА`, `Др В.Војиновића` for `ДР ВЛАДИМИРА ВОЈИНОВИЋА`, `Н. Х. Рада Кончара` for `НАРОДНОГ
+ХЕРОЈА РАДА КОНЧАРА` (double initial), `Проф Војислава Бабића` for `ПРОФЕСОРА ВОЈИСЛАВА БАБИЋА`.
+Normalization already splits the abbreviation dot into a standalone single‑letter token
+(`Б.Марковића` → `Б МАРКОВИЋА`) and expands `Др` → `ДОКТОРА`, so the doc and register align
+position‑by‑position.
+
+Matched **positionally** against each settlement street's **canonical** `name_norm` (not the
+declension/sortkey alt keys, whose reordering would let an initial land on the wrong word), with
+the **same token count**:
+
+- a **single‑letter** doc token matches a register word by **first letter** (`М` → `МИХАЈЛА`);
+- a **title abbreviation** matches its spelled‑out form (`_TITLE_ABBREV = {ПРОФ: ПРОФЕСОРА}` —
+  `ДР` is already handled in normalization on both sides; `ПРОФ` can't be, because the register
+  itself stores some streets abbreviated `ПРОФ.`, so it's a token equivalence here instead);
+- every **other** token must match **exactly** (the surname is the anchor).
+
+Returned only when the match is **unique** — two given names sharing an initial *and* surname
+(`МИХАЈЛА ПУПИНА` vs `МИЛАНА ПУПИНА` → both `М ПУПИНА`) are an unresolvable coin flip and skip.
+Settlement scope only (an inference). Method `abbrev`, conf 0.6, **flagged**; the Worker appends
+„doc name“ → „register name“ like fuzzy/alias so the reviewer confirms each expansion.
+
+### Why / scope
+
+A reviewer hit a Смедеревска Паланка station where ~18 streets were written this way and had to
+re‑assign each by hand. The rule resolves them automatically (only a genuine colloquial name like
+`Улица Дисова` → `ВЛАДИСЛАВА ПЕТКОВИЋА ДИСА`, not an abbreviation, still needs manual review).
+Nationwide: **71 segments across 11 municipalities**, **+~2,200 links, −89 unresolved streets, 0
+new conflicts** (the unique‑surname constraint makes false matches near‑impossible — a normal
+fully‑spelled street has no single‑letter token, so the rule never fires on it).
 
 ## 5.11 Street aliases (`config.STREET_ALIASES` → `_ALIASES`)
 

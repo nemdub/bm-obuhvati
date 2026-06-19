@@ -320,6 +320,50 @@ def _token_subset(primary: str, scope: dict[str, list[str]]) -> str | None:
     return None if (best is None or tied) else best[0]
 
 
+# Title abbreviations the register spells out ("ПРОФ" doc form vs "ПРОФЕСОРА" register form).
+# "ДР"->"ДОКТОРА" is already expanded in normalize on both sides; "ПРОФ" can't be (the register
+# itself stores some streets abbreviated as "ПРОФ.", so expanding would split that population),
+# so it is handled here as a token equivalence in the abbreviation match instead.
+_TITLE_ABBREV = {"ПРОФ": "ПРОФЕСОРА"}
+
+
+def _abbrev_token_match(d: str, r: str) -> bool:
+    """One doc token `d` matches one register token `r` under abbreviation: a single-letter
+    initial matches by first letter; a known title abbreviation matches its spelled-out form;
+    otherwise the tokens must be equal."""
+    if len(d) == 1 and d.isalpha():
+        return r.startswith(d)
+    return d == r or _TITLE_ABBREV.get(d) == r or _TITLE_ABBREV.get(r) == d
+
+
+def _initial_abbrev_match(primary: str, scope: dict[str, list[str]],
+                          street_meta: dict[str, dict]) -> str | None:
+    """A doc street that abbreviates a word — a given name to its initial ("М.Пупина" -> "М
+    ПУПИНА" for register "МИХАЈЛА ПУПИНА"; "Др В.Војиновића" -> "ДОКТОРА В ВОЈИНОВИЋА" for "ДР
+    ВЛАДИМИРА ВОЈИНОВИЋА") or a title ("Проф Војислава Бабића" -> "ПРОФЕСОРА ВОЈИСЛАВА
+    БАБИЋА"). Matched POSITIONALLY against the settlement's streets: an initial matches a
+    register word by first letter, a title abbreviation matches its spelled-out form, every
+    other token matches EXACTLY, same token count. Matched against each street's CANONICAL name
+    (not the declension/sortkey alt keys, whose reordering would let an initial match the wrong
+    word). Returns the register street id only when it is UNIQUE (two given names sharing an
+    initial and surname — "МИХАЈЛА ПУПИНА" vs "МИЛАНА ПУПИНА" — are an unresolvable coin flip)."""
+    dt = primary.split()
+    has_abbrev = any((len(t) == 1 and t.isalpha()) or t in _TITLE_ABBREV for t in dt)
+    if len(dt) < 2 or not has_abbrev:
+        return None
+    if not any(len(t) > 1 and t not in _TITLE_ABBREV for t in dt):  # need a full anchor (surname)
+        return None
+    ids_in_scope = {i for lst in scope.values() for i in lst}
+    found: set[str] = set()
+    for sid in ids_in_scope:
+        rt = street_meta[sid]["name_norm"].split()
+        if len(rt) == len(dt) and all(_abbrev_token_match(d, r) for d, r in zip(dt, rt)):
+            found.add(sid)
+            if len(found) > 1:
+                return None
+    return next(iter(found)) if len(found) == 1 else None
+
+
 _DIGITS_RE = re.compile(r"\d+")
 
 
@@ -566,6 +610,12 @@ def resolve_street(street_raw, muni, settlement_id, idx, settlement_inferred=Fal
     sub = _token_subset(primary, sett_scope)
     if sub:
         return sub, "fuzzy", 88.0, []
+    # Initial-abbreviated given name ("М.Пупина" -> "МИХАЈЛА ПУПИНА"): a single-letter token
+    # matches a register word by first letter, the rest (surname, titles) match exactly. An
+    # inference, so settlement scope only and flagged for review.
+    abv = _initial_abbrev_match(primary, sett_scope, idx[0])
+    if abv:
+        return abv, "abbrev", 70.0, []
 
     # Municipality exact fallback / ambiguity detection.
     for key in ([primary] + ([alt] if alt else [])):
@@ -1172,6 +1222,10 @@ def main() -> int:
             # Hand-maintained substitution — surfaced so the reviewer confirms it once.
             conf = 0.6
             reasons.append("alias")
+        elif method == "abbrev":
+            # Initial-abbreviated given name expanded to a settlement street — confirmable.
+            conf = 0.6
+            reasons.append("abbrev")
         elif method in ("manual", "manual_settlement"):
             conf = 0.9  # reviewer-assigned street/settlement; no flag
             if method == "manual_settlement" and r["street_id"] in street_meta:

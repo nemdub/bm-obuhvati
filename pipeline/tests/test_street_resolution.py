@@ -401,3 +401,38 @@ class TestSettlementEditDistance:
         from stage04_match_addresses import resolve_settlement
         sbm = self._sbm("МИЛОШЕВО", "МИЛАШЕВО")  # both 1 edit from МИЛИШЕВО
         assert resolve_settlement("Милишево", "M", sbm) is None
+
+
+class TestInitialAbbrev:
+    """Initial-abbreviated given names: "М.Пупина" -> register "Михајла Пупина"."""
+
+    def _idx(self):
+        return make_index(
+            {"S1": {
+                "st1": "Михајла Пупина",
+                "st2": "Др Владимира Војиновића",
+                "st3": "Професора Војислава Бабића",
+                "st4": "Стевана Крајца",
+            }},
+            {"S1": "Прво Село"},
+        )
+
+    def test_initial_given_name(self):
+        assert S4.resolve_street("М.Пупина", MUNI, "S1", self._idx())[:2] == ("st1", "abbrev")
+
+    def test_initial_with_dr_title(self):
+        # "Др" expands to ДОКТОРА on both sides; the initial В matches ВЛАДИМИРА.
+        assert S4.resolve_street("Др В.Војиновића", MUNI, "S1", self._idx())[:2] == ("st2", "abbrev")
+
+    def test_prof_title_equivalence(self):
+        # "Проф" (no initial) matches the register's spelled-out "ПРОФЕСОРА".
+        assert S4.resolve_street("Проф Војислава Бабића", MUNI, "S1", self._idx())[:2] == ("st3", "abbrev")
+
+    def test_unique_guard_blocks_ambiguous_initial(self):
+        # Two given names sharing an initial + surname -> coin flip -> not resolved by abbrev.
+        idx = make_index({"S1": {"a": "Михајла Пупина", "b": "Милана Пупина"}}, {"S1": "Прво Село"})
+        assert S4.resolve_street("М.Пупина", MUNI, "S1", idx)[1] != "abbrev"
+
+    def test_full_name_not_via_abbrev(self):
+        # A fully spelled street (no initial) resolves exact, not abbrev.
+        assert S4.resolve_street("Стевана Крајца", MUNI, "S1", self._idx())[:2] == ("st4", "exact")

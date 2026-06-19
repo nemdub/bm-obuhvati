@@ -21,6 +21,7 @@ comma‑separated codes. `needs_review` is set when any *flagging* reason is pre
 | `base_parts` | 0.7 | yes |
 | `locality` | 0.7 | yes |
 | `alias` | 0.6 | yes |
+| `abbrev` | 0.6 | yes |
 | `fuzzy` | 0.5 | yes |
 | `proximity` | 0.5 | yes |
 | `muni_fallback` | 0.4 | yes |
@@ -38,6 +39,7 @@ Assembled per segment (`reasons` list):
 | `fuzzy` | method fuzzy / token‑subset |
 | `proximity` | resolved by the geographic proximity pass (nearest unclaimed same‑named / fuzzy‑close street near the station's coverage — see [05](05-street-resolution.md) §5.14) |
 | `alias` | hand‑maintained alias substitution |
+| `abbrev` | initial/title‑abbreviated name expanded to a settlement street (`М.Пупина` → `МИХАЈЛА ПУПИНА` — see [05](05-street-resolution.md) §5.10a) |
 | `base_parts` | plain base name expanded to numbered part streets |
 | `locality` | single-word coverage expanded to a register sub-locality/hamlet cluster (заселак prefix — see [05](05-street-resolution.md) §5.15) |
 | `settlement_claim:НАЗИВ` | whole‑settlement (village) claim |
