@@ -306,6 +306,32 @@ class TestOdDoRanges:
         assert segs[0].street_raw == "Добри До" and segs[0].whole is True
 
 
+class TestDashDoKraja:
+    """A dash used in place of "од … до" ("98-до краја" == "од 98 до краја")."""
+
+    def test_dash_do_kraja_open_ended(self):
+        # "98-до краја" -> [98, OPEN_END, even] (98 is even).
+        segs = parse_coverage("Лазара Мићуновића 98-до краја")
+        assert segs[0].street_raw == "Лазара Мићуновића"
+        assert segs[0].intervals == [[98, OPEN_END, "even"]]
+
+    def test_dash_do_kraja_with_space(self):
+        # "12- до краја" (space after the dash) parses the same.
+        segs = parse_coverage("Прва 12- до краја")
+        assert segs[0].intervals == [[12, OPEN_END, "even"]]
+
+    def test_two_dash_do_kraja_split_by_parity(self):
+        # "19-до краја и 44-до краја" -> odd from 19 AND even from 44, one street.
+        segs = parse_coverage("Лазара Мићуновића 19-до краја и 44-до краја")
+        assert len(segs) == 1
+        assert segs[0].intervals == [[19, OPEN_END, "odd"], [44, OPEN_END, "even"]]
+
+    def test_plain_number_dash_range_untouched(self):
+        # The fix only triggers before "до"; a plain "N-M" range is still a range.
+        segs = parse_coverage("Прва 2-44")
+        assert segs[0].intervals == [[2, 44, "even"]]
+
+
 class TestSideOfStreetParity:
     def test_na_parnoj_strani_overrides_to_even(self):
         segs = parse_compact("Прва 2-100 на парној страни")
@@ -314,6 +340,48 @@ class TestSideOfStreetParity:
     def test_neparna_strana_overrides_to_odd(self):
         segs = parse_compact("Прва 1-99 непарна страна")
         assert segs[0].intervals == [[1, 99, "odd"]]
+
+    def test_standalone_neparna_strana_is_whole_odd_side(self):
+        # "Белодримска непарна страна" -> the whole odd side, [1, OPEN_END, odd].
+        segs = parse_compact("Белодримска непарна страна")
+        assert segs[0].street_raw == "Белодримска"
+        assert segs[0].intervals == [[1, OPEN_END, "odd"]] and segs[0].whole is False
+
+    def test_standalone_parni_brojevi_is_whole_even_side(self):
+        # "парни бројеви" (no specific numbers) -> the whole even side, [2, OPEN_END, even].
+        segs = parse_compact("Љубе Нешића парни бројеви")
+        assert segs[0].intervals == [[2, OPEN_END, "even"]]
+
+    def test_dash_separator_before_side_is_dropped(self):
+        # "Бањска - непарна страна": the separator dash is stripped from the name.
+        segs = parse_compact("Бањска - непарна страна")
+        assert segs[0].street_raw == "Бањска"
+        assert segs[0].intervals == [[1, OPEN_END, "odd"]]
+
+    def test_side_directive_continues_previous_street(self):
+        # "и непарни бројеви" as its own clause qualifies the previous street.
+        segs = parse_compact("Краља Петра Првог 0 и непарни бројеви")
+        assert len(segs) == 1
+        s = segs[0]
+        assert s.singles == [[0, ""]] and s.intervals == [[1, OPEN_END, "odd"]]
+
+    def test_side_before_range(self):
+        # "непарни од 1 до 9 и парни од 14 до 86" -> two parity-split ranges, one street.
+        segs = parse_compact("Гаврилова непарни од 1 до 9 и парни од 14 до 86")
+        assert len(segs) == 1
+        assert segs[0].intervals == [[1, 9, "odd"], [14, 86, "even"]]
+
+    def test_parity_register_street_not_split(self):
+        # ПАРНИЧКА / ПАРНИЦА start with the parity stem but are real streets — never split.
+        segs = parse_compact("Парничка 5, Парница")
+        assert [s.street_raw for s in segs] == ["Парничка", "Парница"]
+        assert segs[0].singles == [[5, ""]] and segs[1].whole is True
+
+    def test_users_combined_example(self):
+        # The motivating station text: odd side + even-from-98 on one street.
+        segs = parse_coverage("Белодримска непарна страна и 98-до краја")
+        assert len(segs) == 1 and segs[0].street_raw == "Белодримска"
+        assert segs[0].intervals == [[1, OPEN_END, "odd"], [98, OPEN_END, "even"]]
 
 
 class TestBrojLabel:

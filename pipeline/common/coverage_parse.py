@@ -118,12 +118,22 @@ def is_od_token(w: str) -> bool:
     return _word(w) == "од"
 
 
+# Side-of-street adjective forms ("парна страна", "парни бројеви", "на парној страни", …).
+# Matched as an EXACT declined-form set, NOT a "парн…" prefix, so the register streets that
+# start with the same stem (ПАРНИЦА, ПАРНИЧКА — the only two nationwide) are never mistaken
+# for a side directive.
+_PARNA_FORMS = {"парна", "парне", "парни", "парно", "парној", "парну",
+                "парнога", "парном", "парним", "парних"}
+_NEPARNA_FORMS = {"непарна", "непарне", "непарни", "непарно", "непарној", "непарну",
+                  "непарнога", "непарном", "непарним", "непарних"}
+
+
 def _side_parity(w: str) -> str | None:
     """Side-of-street indicator: 'парна/парној страна' -> even, 'непарна/непарној' -> odd."""
     wl = _word(w)
-    if wl.startswith("непарн"):
+    if wl in _NEPARNA_FORMS:
         return "odd"
-    if wl.startswith("парн"):
+    if wl in _PARNA_FORMS:
         return "even"
     return None
 
@@ -170,6 +180,12 @@ def parse_number_token(tok: str, seg: Segment) -> None:
 
 def _add_numbers(seg: Segment, words: list[str]) -> None:
     i, n = 0, len(words)
+    # A side word ("парна"/"непарни"/...) qualifies the parity of a nearby range. It may come
+    # BEFORE the range ("непарни од 1 до 9"), AFTER it ("2-100 на парној"), or stand ALONE
+    # ("Белодримска непарна страна", "Љубе Нешића парни бројеви") — meaning the whole side of
+    # the street. We remember it as `pending_side` and resolve it against the range it touches.
+    pending_side: str | None = None
+    base_iv, base_sg, base_uk = len(seg.intervals), len(seg.singles), len(seg.unknown_tokens)
     while i < n:
         w = words[i]
         wl = _word(w)
@@ -178,10 +194,10 @@ def _add_numbers(seg: Segment, words: list[str]) -> None:
         if wl in ("и", "од", "па", "на", "страна", "страни", "стране", "страну") or is_broj_token(w):
             i += 1
             continue
-        # Side indicator overrides the parity of the range it qualifies ("2-100 на парној").
+        # Side indicator ("парн…"/"непарн…"): remember it; applied to the range it qualifies.
         side = _side_parity(w)
-        if side and seg.intervals:
-            seg.intervals[-1][2] = side
+        if side is not None:
+            pending_side = side
             i += 1
             continue
         # "N до краја" / "N до M": a "до"-connected range (only here is "до" a connector, not
@@ -198,16 +214,35 @@ def _add_numbers(seg: Segment, words: list[str]) -> None:
                 if k < n and _word(words[k]) in _KRAJA:
                     seg.intervals.append([lo, OPEN_END, "odd" if lo % 2 else "even"])
                     i = k + 1
+                    pending_side = _apply_pending_side(seg, pending_side)
                     continue
                 if k < n and is_house_token(words[k]):
                     hi = int(re.match(r"\d+", words[k]).group())
                     seg.intervals.append([lo, hi, interval_parity(lo, hi)])
                     i = k + 1
+                    pending_side = _apply_pending_side(seg, pending_side)
                     continue
+        before = len(seg.intervals)
         parse_number_token(w, seg)
+        if pending_side and len(seg.intervals) > before:
+            pending_side = _apply_pending_side(seg, pending_side)
         i += 1
+    # A side word left unconsumed: apply it to the range it touched, or — if this call added no
+    # numbers at all — treat it as a whole-side claim ("непарна страна" => all odd / all even).
+    if pending_side is not None:
+        if len(seg.intervals) > base_iv:
+            seg.intervals[-1][2] = pending_side
+        elif len(seg.singles) == base_sg and len(seg.unknown_tokens) == base_uk:
+            seg.intervals.append([1 if pending_side == "odd" else 2, OPEN_END, pending_side])
     if seg.intervals or seg.singles:
         seg.whole = False
+
+
+def _apply_pending_side(seg: Segment, pending_side: str | None) -> None:
+    """Apply a pending side-of-street parity to the interval just appended, then clear it."""
+    if pending_side and seg.intervals:
+        seg.intervals[-1][2] = pending_side
+    return None
 
 
 def _split_on_connector(words: list[str]) -> list[list[str]]:
@@ -310,6 +345,13 @@ def parse_compact(text: str, settlement: str = "", is_street=None) -> list[Segme
                 # 1-17"). "од" is unambiguous here (the toponym is "До", not "од").
                 if is_broj_token(piece[j]) or is_od_token(piece[j]):
                     break
+                # A parity word ends the street name and begins a side directive ("Белодримска
+                # непарна страна", "Љубе Нешића парни бројеви", "Гаврилова непарни од 1 до 9").
+                # At j == 0 the name is empty, so the directive continues the previous street
+                # ("Краља Петра Првог 0 и непарни бројеви"). _side_parity only matches the exact
+                # adjective forms, so register streets like ПАРНИЧКА are never split here.
+                if _side_parity(piece[j]) is not None:
+                    break
                 if not is_number_side(piece[j]):
                     j += 1
                     continue
@@ -338,6 +380,13 @@ def parse_compact(text: str, settlement: str = "", is_street=None) -> list[Segme
                     continue
                 break
             name_words, num_words = piece[:j], piece[j:]
+            # Drop a trailing separator dash, but ONLY before a parity directive
+            # ("Бањска - непарна страна" => name "Бањска"). A dash that is part of the street
+            # name ("Потес Јездинско поље - 1 нова") is followed by numbers, not a side word,
+            # and is left intact.
+            if num_words and _side_parity(num_words[0]) is not None:
+                while name_words and name_words[-1] in ("-", "–"):
+                    name_words.pop()
             if not name_words:
                 if last_street is not None:
                     _add_numbers(last_street, num_words)
@@ -420,6 +469,11 @@ _DASH_SPACE = re.compile(r"(\d)\s*[-–]\s*(\d)")
 # Ordinal glued to the following word ("7.јула", "1.маја", "10.октобра") — split so "7." is
 # seen as an ordinal (street-name part) instead of a house number "7" + junk.
 _ORDINAL_GLUE = re.compile(r"(\d+\.)([А-Яа-яЂ-џA-Za-z])")
+# A dash used in place of the "од … до" range form glues the lower bound onto "до": "98-до
+# краја" means "од 98 до краја" (98 to the end of the street). Split the dash off so the
+# "N до краја" / "N до M" grammar (_add_numbers, 2.12) sees it. Only when "до" follows a
+# digit-dash — a plain "N-M" range (digit-dash-digit) is untouched.
+_NUM_DO_DASH = re.compile(r"(\d)\s*[-–]\s*(до)\b", re.IGNORECASE)
 # Prose list-introducer: some docs (Беочин) prefix the street list with a sentence ending
 # "...у улици:" / "...у улицама:" ("voters residing in MZ … in the street(s):"). Strip up to
 # and including it so the sentence isn't glued onto the first street. Nationwide this
@@ -438,6 +492,7 @@ def parse_coverage(text: str, is_street=None) -> list[Segment]:
         return []
     text = _LIST_PREAMBLE_RE.sub("", text)
     text = _DEO_GLUE.sub(r"\1 \2", text)
+    text = _NUM_DO_DASH.sub(r"\1 \2", text)
     text = _DASH_SPACE.sub(r"\1-\2", text)
     text = _ORDINAL_GLUE.sub(r"\1 \2", text)
     is_structured = bool(_ULICA.search(text) and _BROJEVI.search(text))
