@@ -477,3 +477,49 @@ class TestTextPreprocessing:
         # Normal coverage (no preamble) is unchanged, incl. a street named "... улица".
         segs = parse_coverage("Цара Лазара 1-23, Сутјеска улица")
         assert [s.street_raw for s in segs] == ["Цара Лазара", "Сутјеска улица"]
+
+
+class TestObuhvataPreamble:
+    """Smederevska Palanka 'обухвата … улица[:]' prose preambles."""
+
+    def test_podrucje_ulica_stripped(self):
+        segs = parse_coverage("обухвата подручје улица: 7. јула, Азањске чете, Алексе Даниловића")
+        assert [s.street_raw for s in segs] == ["7. јула", "Азањске чете", "Алексе Даниловића"]
+
+    def test_no_colon_and_glued_digit(self):
+        # "обухвата подручје улица28. марта" — no colon, the label glued to the first number.
+        segs = parse_coverage("обухвата подручје улица28. марта, Боре Станковића")
+        assert [s.street_raw for s in segs] == ["28. марта", "Боре Станковића"]
+
+    def test_settlement_based_preamble(self):
+        segs = parse_coverage(
+            "обухвата бираче са подручја Месне заједнице Баничина - подручје улица: Босићка, Бркина")
+        assert [s.street_raw for s in segs] == ["Босићка", "Бркина"]
+
+    def test_no_collapse_to_structured(self):
+        # The bug: "улица" (preamble) + "(од броја …)" flipped the cell to the structured
+        # dialect and collapsed it to one segment. The strip keeps it compact.
+        segs = parse_coverage(
+            "обухвата подручје улица 27. марта, Краља Петра првог (од броја 97 до краја непарна), Ловачка")
+        assert [s.street_raw for s in segs] == ["27. марта", "Краља Петра првог", "Ловачка"]
+        assert segs[1].intervals == [[97, 100000, "odd"]]
+
+
+class TestNumberParenUnwrap:
+    """Parenthesised number/side directives are unwrapped; alt-names are kept."""
+
+    def test_paren_range_directive_unwrapped(self):
+        segs = parse_coverage(
+            "Краља Петра првог (од броја 97 до краја непарна, од броја 102 до краја парна страна)")
+        assert segs[0].street_raw == "Краља Петра првог"
+        assert segs[0].intervals == [[97, 100000, "odd"], [102, 100000, "even"]]
+
+    def test_paren_all_odd_unwrapped(self):
+        segs = parse_coverage("Омладинска (сви непарни бројеви)")
+        assert segs[0].street_raw == "Омладинска" and segs[0].intervals == [[1, 100000, "odd"]]
+
+    def test_altname_paren_kept(self):
+        # No number/side directive inside -> left intact for stage04 alt-name matching.
+        for raw in ("Корзо (Бориса Кидрича)", "Елека Бенедека (493. нова)"):
+            segs = parse_coverage(raw)
+            assert segs[0].street_raw == raw

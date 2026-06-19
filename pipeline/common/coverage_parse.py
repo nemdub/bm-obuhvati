@@ -190,8 +190,10 @@ def _add_numbers(seg: Segment, words: list[str]) -> None:
         w = words[i]
         wl = _word(w)
         # Range-grammar fillers, dropped: list "и", "од" (from), "бр./број(а)" (label),
-        # "па" (and onwards), "на"/"страна/страни" (side-of-street phrasing).
-        if wl in ("и", "од", "па", "на", "страна", "страни", "стране", "страну") or is_broj_token(w):
+        # "па" (and onwards), "на"/"страна/страни" (side-of-street phrasing), "сви/све" (all,
+        # the redundant quantifier in "сви непарни бројеви").
+        if wl in ("и", "од", "па", "на", "страна", "страни", "стране", "страну",
+                  "сви", "све", "сва", "свих") or is_broj_token(w):
             i += 1
             continue
         # Side indicator ("парн…"/"непарн…"): remember it; applied to the range it qualifies.
@@ -345,6 +347,11 @@ def parse_compact(text: str, settlement: str = "", is_street=None) -> list[Segme
                 # 1-17"). "од" is unambiguous here (the toponym is "До", not "од").
                 if is_broj_token(piece[j]) or is_od_token(piece[j]):
                     break
+                # A leading "all" quantifier before a parity word is part of the number
+                # directive, not the name ("Омладинска сви непарни бројеви" -> "Омладинска").
+                if (j > 0 and _word(piece[j]) in ("сви", "све", "сва", "свих")
+                        and j + 1 < len(piece) and _side_parity(piece[j + 1]) is not None):
+                    break
                 # A parity word ends the street name and begins a side directive ("Белодримска
                 # непарна страна", "Љубе Нешића парни бројеви", "Гаврилова непарни од 1 до 9").
                 # At j == 0 the name is empty, so the directive continues the previous street
@@ -486,6 +493,37 @@ _NUM_DO_DASH = re.compile(r"(\d)\s*[-–]\s*(до)\b", re.IGNORECASE)
 # colon-terminated marker occurs only in this preamble; the structured 'Улица:' label is
 # never preceded by "у ", so structured docs are untouched.
 _LIST_PREAMBLE_RE = re.compile(r"^.*?\bу\s+улиц(?:и|ама)\s*:\s*", re.IGNORECASE | re.DOTALL)
+# Smederevska Palanka prefixes every list with a descriptive sentence — "обухвата подручје
+# улица: …", "обухвата бираче са подручја Месне заједнице <NAME> – подручје улица: …",
+# "обухвата … бирачког места <NAME> N као и подручје улица …". The closing "улица" label glues
+# onto the first street AND (since it matches the structured `Улица:` predicate while a
+# parenthetical "(од броја …)" supplies a `број` token) flips the whole cell to the structured
+# dialect, collapsing it into one segment. Strip from "обухвата" through the FIRST such "улица"
+# marker (+ optional ":"/"-" or a glued digit) so the clean street list remains. The settlement
+# names in the preamble never contain "улиц", so the first match is always the label, not a
+# street in the list. Anchored on a
+# leading "обухвата", a verb that only ever opens these preambles — nationwide it occurs only
+# in this municipality, so other docs are untouched.
+_OBUHVATA_PREAMBLE_RE = re.compile(
+    r"^\s*обухвата\b.*?\bулиц[ае](?=[\s:\-–]|\d|$)\s*[:\-–]?\s*", re.IGNORECASE | re.DOTALL)
+# Some docs put a street's NUMBER directive inside parentheses — "Краља Петра првог (од броја
+# 97 до краја непарна, од броја 102 до краја парна страна)", "Омладинска (сви непарни бројеви)".
+# A comma inside the parens splits the clause, stranding an unbalanced "(" in the street name
+# (which stage04's `(...)` stripper, needing a closing paren, then can't remove). UNWRAP such a
+# parenthetical — drop the parens, keep the content — so the directive parses as the street's
+# numbers (a leading "од …" fragment continues the previous street, see 2.9). Only NUMBER/SIDE
+# directives are unwrapped; an ALT-NAME parenthetical ("(Бориса Кидрича)", "(493. нова)") has no
+# such marker and is left intact for stage04's alt-name matching.
+_PAREN_GROUP_RE = re.compile(r"\(([^()]*)\)")
+_PAREN_DIRECTIVE_RE = re.compile(
+    r"\b(?:не)?парн[аеиоуј]|\bсви\b|\bцел[ао]\b|до\s+краја|\bбр\b|\bброј|\d+\s*[-–]\s*\d|\bод\b[^()]*\d",
+    re.IGNORECASE)
+
+
+def _unwrap_number_parens(text: str) -> str:
+    return _PAREN_GROUP_RE.sub(
+        lambda m: f" {m.group(1)} " if _PAREN_DIRECTIVE_RE.search(m.group(1)) else m.group(0),
+        text)
 
 
 def parse_coverage(text: str, is_street=None) -> list[Segment]:
@@ -497,6 +535,8 @@ def parse_coverage(text: str, is_street=None) -> list[Segment]:
     if not text or not text.strip():
         return []
     text = _LIST_PREAMBLE_RE.sub("", text)
+    text = _OBUHVATA_PREAMBLE_RE.sub("", text)
+    text = _unwrap_number_parens(text)
     text = _DEO_GLUE.sub(r"\1 \2", text)
     text = _NUM_DO_DASH.sub(r"\1 \2", text)
     text = _DASH_SPACE.sub(r"\1-\2", text)

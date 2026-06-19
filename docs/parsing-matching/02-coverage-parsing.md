@@ -417,6 +417,8 @@ dialect detection):
 | Regex | Fix | Example |
 |-------|-----|---------|
 | `_LIST_PREAMBLE_RE` | drop a prose list‑introducer ending `у улици:` / `у улицама:` | `…у МЗ Беочин град у улицама: 1.маја, …` → `1.маја, …` |
+| `_OBUHVATA_PREAMBLE_RE` | drop a Смед. Паланка `обухвата … улица[:]` preamble | `обухвата подручје улица: 7. јула, …` → `7. јула, …` |
+| `_unwrap_number_parens` | unwrap a parenthesised number/side directive | `Омладинска (сви непарни бројеви)` → `Омладинска сви непарни бројеви` |
 | `_DEO_GLUE` | split `део` glued to a number | `део13` → `део 13` (see 2.7) |
 | `_NUM_DO_DASH` | split a dash standing in for `од … до` | `98-до краја` → `98 до краја` (see 2.12) |
 | `_DASH_SPACE` | collapse spaces around a range dash, **digits only** | `2- 100`, `2 - 100` → `2-100` |
@@ -444,4 +446,18 @@ dialect detection):
   54.` → houses `52`, `54`, but `8. Март`, `7. јула`, `Краља Петра 2. део` keep their number in
   the name. Without this, `52.` glued into the street name and `54.` became a phantom segment
   that the OSM fallback then geocoded to an unrelated place (see [05](05-street-resolution.md)).
+- **`_OBUHVATA_PREAMBLE_RE`** strips a Смедеревска Паланка preamble — `обухвата подручје улица[:]
+  …`, `обухвата бираче са подручја Месне заједнице <NAME> – подручје улица[:] …`, `обухвата …
+  бирачког места <NAME> N као и подручје улица …` — up to and including the **first** `улица`
+  label (+ optional `:`/`-` or a glued digit `улица28`). Like the Беочин case, that `улица` both
+  glues onto the first street and (with a `(од броја …)` parenthetical supplying a `број` token)
+  flips the whole cell to the **structured** dialect, collapsing it to one segment. Anchored on a
+  leading `обухвата`, a verb that nationwide opens **only** these 49 muni‑71102 preambles.
+- **`_unwrap_number_parens`** removes the parentheses around a NUMBER/SIDE directive so it parses
+  as the preceding street's numbers: `Краља Петра првог (од броја 97 до краја непарна, од броја
+  102 до краја парна страна)` → intervals `[[97, ∞, 'odd'], [102, ∞, 'even']]`. A comma inside the
+  parens otherwise splits the clause and strands an unbalanced `(` in the street name that
+  stage04's `(…)` stripper (needing a closing paren) cannot remove. Only directive parentheticals
+  are unwrapped — an **alt‑name** (`(Бориса Кидрича)`, `(493. нова)`, no parity/`од`/`до краја`/
+  range/`бр` marker) is left intact for stage04's alt‑name matching ([05](05-street-resolution.md)).
 
