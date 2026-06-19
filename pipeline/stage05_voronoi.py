@@ -133,6 +133,33 @@ def to_wgs84(geom):
     return shp_transform(lambda xs, ys: _TO_WGS84.transform(xs, ys), geom)
 
 
+def _osm_foreign_overlap(geom, sid, X, Y, sids_all, buckets, B) -> tuple[int, int]:
+    """Count matched addresses inside an OSM claim geometry, split (own, other) by owning
+    station. Uses the coarse point grid (`buckets`, cell size `B`) to gather candidates within
+    the geom's bbox, then an exact contains test. Unassigned points (no station) are ignored."""
+    minx, miny, maxx, maxy = geom.bounds
+    i0, i1 = int(np.floor(minx / B)), int(np.floor(maxx / B))
+    j0, j1 = int(np.floor(miny / B)), int(np.floor(maxy / B))
+    cand: list[int] = []
+    for i in range(i0, i1 + 1):
+        for j in range(j0, j1 + 1):
+            cand.extend(buckets.get(i * 10_000_019 + j, ()))
+    if not cand:
+        return 0, 0
+    shapely.prepare(geom)
+    own = other = 0
+    for k in cand:
+        s = sids_all[k]
+        if s == UNASSIGNED:
+            continue
+        if geom.contains(Point(X[k], Y[k])):
+            if s == sid:
+                own += 1
+            else:
+                other += 1
+    return own, other
+
+
 def station_clip_geoms(df: pl.DataFrame, boundaries: dict) -> dict[int, object]:
     """{station_id: clip geometry (UTM)} — the union of the official boundaries of the
     municipalities its LINKED addresses lie in (not the station's own municipality, so
@@ -316,23 +343,34 @@ def main() -> int:
     # geocoded against OpenStreetMap in stage04 (data/osm_claims.parquet, UTM WKT, already
     # clipped to the municipality). Union it into the station's claim geometry exactly like a
     # whole-settlement claim, so it merges with any point-Voronoi cells the station also has.
+    # REJECTED when the geocoded shape runs over another station's coverage (see
+    # `_osm_foreign_overlap` / OSM_FOREIGN_REJECT_MIN) — a whole-street OSM line drawn through a
+    # neighbouring registered street would otherwise cover addresses that belong to other stations.
+    n_osm_rejected = 0
     if config.OSM_CLAIMS_PARQUET.exists():
         oc = pl.read_parquet(config.OSM_CLAIMS_PARQUET)
         if affected is not None:
             oc = oc.filter(pl.col("station_id").is_in(list(affected)))
         for (sid,), grp in oc.group_by("station_id"):
+            sid = int(sid)
             geoms = []
             for w in grp["wkt"].to_list():
                 try:
                     g = shapely.make_valid(shapely.from_wkt(w))
                 except Exception:
                     continue
-                if not g.is_empty:
-                    geoms.append(g)
+                if g.is_empty:
+                    continue
+                own, other = _osm_foreign_overlap(g, sid, X, Y, sids_all, buckets, B)
+                if other >= config.OSM_FOREIGN_REJECT_MIN and other > own:
+                    n_osm_rejected += 1
+                    continue
+                geoms.append(g)
             if geoms:
-                sid = int(sid)
                 geoms += [claim_geom[sid]] if sid in claim_geom else []
                 claim_geom[sid] = geoms[0] if len(geoms) == 1 else unary_union(geoms)
+    if n_osm_rejected:
+        print(f"  OSM claims rejected (overlap other stations' coverage): {n_osm_rejected:,}")
 
     rows: list[dict] = []
     now = datetime.now(timezone.utc).isoformat()

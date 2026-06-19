@@ -509,6 +509,13 @@ def _strip_settlement_prefix(name: str) -> str:
     return name
 
 
+def _has_coverage(parsed: dict) -> bool:
+    """True when a parsed segment claims any coverage (whole street, бб, or specific numbers).
+    An empty claim (e.g. a reviewer who cleared the segment) gets no OSM shape."""
+    return bool(parsed.get("whole") or parsed.get("intervals")
+                or parsed.get("singles") or parsed.get("bez_broja"))
+
+
 def _weak_substring_fuzzy(rec, street_meta) -> bool:
     """A 'fuzzy' match that is really a single-word coverage caught as a NON-leading substring
     of a longer register street — the Sombor „Жарковац" → „БРАНКА РАДИЧЕВИЋА ЖАРКОВАЦ" trap:
@@ -1140,8 +1147,14 @@ def main() -> int:
     # osm_fallback_pass). Skipped when offline with an empty cache (no network and nothing to
     # replay), so the offline tests never touch it.
     osm_claims: list[dict] = []
+    # The OSM claim draws the whole geocoded street/area — meaningful only when the segment
+    # actually claims coverage. A segment with EMPTY effective coverage (no whole/intervals/
+    # singles/бб) claims nothing, so it gets no OSM shape. This also lets a reviewer suppress an
+    # OSM polygon by clearing the segment's coverage (the intuitive action), not only via the
+    # "doesn't exist" button (which sets method 'manual_none', already excluded here).
     osm_pending = [r for r in seg_recs
-                   if r["method"] in ("none", "ambiguous") or _weak_substring_fuzzy(r, street_meta)]
+                   if (r["method"] in ("none", "ambiguous") or _weak_substring_fuzzy(r, street_meta))
+                   and _has_coverage(r["parsed"])]
     if osm_pending and not (osm._offline() and not config.OSM_CACHE_JSON.exists()):
         muni_bounds = load_muni_boundaries()  # {muni_id: polygon (UTM34N)}
         m = pl.read_parquet(config.MUNICIPALITIES_PARQUET)

@@ -282,3 +282,39 @@ class TestWeakSubstringFuzzy:
         meta = {"ST": {"name_norm": "БРАНКА РАДИЧЕВИЋА ЖАРКОВАЦ"}}
         assert S4._weak_substring_fuzzy(
             {"method": "exact", "street_id": "ST", "street_raw": "Жарковац"}, meta) is False
+
+
+class TestHasCoverage:
+    """_has_coverage gates the OSM fallback: an empty (reviewer-cleared) segment gets no shape."""
+
+    def test_empty_is_false(self):
+        assert S4._has_coverage({"whole": False, "intervals": [], "singles": [], "bez_broja": False}) is False
+
+    def test_whole_is_true(self):
+        assert S4._has_coverage({"whole": True, "intervals": [], "singles": []}) is True
+
+    def test_intervals_is_true(self):
+        assert S4._has_coverage({"whole": False, "intervals": [[1, 9, "odd"]], "singles": []}) is True
+
+    def test_bez_broja_is_true(self):
+        assert S4._has_coverage({"whole": False, "intervals": [], "singles": [], "bez_broja": True}) is True
+
+
+class TestOsmForeignOverlap:
+    """_osm_foreign_overlap counts matched addresses inside an OSM claim, split own vs other."""
+
+    def test_counts_split_by_station(self):
+        import numpy as np
+        from shapely.geometry import box
+        from stage05_voronoi import _osm_foreign_overlap, UNASSIGNED
+        # points: 2 own (sid 5), 3 other (sid 9), 1 unassigned — all inside the unit box;
+        # 1 own point far outside.
+        X = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 100.0])
+        Y = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 100.0])
+        sids = np.array([5, 5, 9, 9, 9, UNASSIGNED, 5])
+        B = 1.0
+        buckets = {}
+        for k in range(len(X)):
+            buckets.setdefault(int(np.floor(X[k] / B)) * 10_000_019 + int(np.floor(Y[k] / B)), []).append(k)
+        own, other = _osm_foreign_overlap(box(0, 0, 1, 1), 5, X, Y, sids, buckets, B)
+        assert (own, other) == (2, 3)  # the far own point and the unassigned point excluded

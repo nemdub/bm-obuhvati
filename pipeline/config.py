@@ -115,6 +115,14 @@ OSM_POINT_BUFFER_M = 300.0          # radius buffer for a geocoded place node wi
 # street centroid the station already has. Stations with no resolved coverage have no anchor and
 # are exempt (OSM is then the only signal). ~3 km mirrors PROXIMITY_RADIUS_CAP_M.
 OSM_MAX_COVERAGE_DIST_M = 3000.0
+# A geocoded OSM claim draws a whole street/area; when the register can't place the doc street
+# (e.g. a town street absent from the register), the OSM line is drawn in full and can run over a
+# neighbouring street whose addresses belong to OTHER stations — violating one-address-one-station
+# and looking like wrong coverage. stage05 rejects an OSM claim whose footprint contains at least
+# this many matched addresses belonging to OTHER stations AND more of them than the claiming
+# station's own (a legitimate register-gap claim sits on addresses the register lacks, so few/no
+# foreign matched points fall inside it).
+OSM_FOREIGN_REJECT_MIN = 10
 
 # ── Manual overrides for doc filename -> municipality (Latin register name). ──
 # Auto-matching in stage02 handles most files; add corrections here when the
