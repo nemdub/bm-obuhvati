@@ -461,13 +461,31 @@ scope alone still lets a common street name land on a same-named place in anothe
   coverage have no anchor and are exempt (OSM is then the only signal). Rejected segments stay
   unresolved and flagged — an honest coverage gap, never a wrong far-away polygon. stage04 prints
   the rejection count (`OSM claims rejected as far from coverage`).
+- **Empty coverage gets no shape** (stage04, `_has_coverage`). The OSM claim draws the *whole*
+  geocoded street/area, so it is only meaningful when the segment actually claims coverage. A
+  segment whose effective parse is empty (no whole / intervals / singles / бб) is skipped. This
+  also gives reviewers an intuitive off-switch: **clearing a segment's coverage drops its OSM
+  polygon** (the "doesn't exist" button — method `manual_none` — already suppresses it too).
+
+**Overlap with other stations' coverage → rejected in stage05** (`_osm_foreign_overlap`,
+`OSM_FOREIGN_REJECT_MIN`). A whole-street OSM line for a street the register can't place (e.g. a
+town `Петра Драпшина` absent from the register, drawn in full) runs **alongside a neighbouring
+registered street** and its buffer covers addresses that belong to **other** stations — a visible
+violation of one-address-one-station. stage05 counts matched addresses inside each OSM claim,
+split own vs other; the claim is **dropped** when it contains ≥ `OSM_FOREIGN_REJECT_MIN` (10)
+foreign matched addresses AND more foreign than own (a legitimate register-gap claim sits on
+addresses the register *lacks*, so few/no foreign points fall inside it). A claim where the
+station has the larger share — e.g. a real settlement polygon covering its own village plus a few
+neighbours — is kept. Prints `OSM claims rejected (overlap other stations' coverage)`.
 
 **Geometry is the coverage.** There is no register street id and no address links — stage05
 draws the OSM geometry directly (unioned with any point-Voronoi cells the station also has),
 exactly like a whole-settlement claim. An OSM **area** is used as-is; a **street LineString**
 is buffered by `OSM_STREET_BUFFER_M`, a bare **place node** by `OSM_POINT_BUFFER_M`. Method
 `osm`, confidence 0.5, reason `osm_fallback` — **always flagged for review**, because a
-buffered point/line is an approximation a human should confirm or redraw.
+buffered point/line is an approximation a human should confirm or redraw. The review note tells
+the reviewer how to remove it (clear coverage / "doesn't exist") and that the map updates on the
+next recompute (OSM polygons live in the stored R2 layer, not the live point preview).
 
 **Caching (committed) & offline mode.** Every Nominatim response — hit *or* miss — is cached
 in `data/osm_cache.json`, keyed `kind|muni_id|normalized_name`, and **committed to the repo**,
