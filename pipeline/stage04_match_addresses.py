@@ -680,7 +680,7 @@ def resolve_street_claims(claims: list[dict], rows: list[tuple]) -> tuple[dict[i
 
 
 def osm_fallback_pass(pending, station_muni, muni_bounds, muni_name,
-                      claims_by_street, street_meta) -> list[dict]:
+                      claims_by_street, street_meta, resolved_by_station) -> list[dict]:
     """Geocode unresolved (or weakly-matched) segments against OpenStreetMap, emit geometry.
 
     Two kinds of segment fall here:
@@ -717,12 +717,18 @@ def osm_fallback_pass(pending, station_muni, muni_bounds, muni_name,
         return viewbox_cache[mid]
 
     osm_claims: list[dict] = []
+    n_far = 0
     for r in pending:
         mid = station_muni.get(r["station_id"])
         if mid is None or mid not in muni_name:
             continue
         name = _strip_settlement_prefix(normalize_street(_PAREN_RE.sub(" ", r["street_raw"])))
         if not name:
+            continue
+        # Never geocode a query with no letters (a bare number like "54" left by a mis-parsed
+        # house number): Nominatim resolves it to an unrelated numbered admin relation far from
+        # the station (e.g. a 9 km² area over the town centre). A place name has letters.
+        if not any(ch.isalpha() for ch in name):
             continue
         vb = _viewbox(mid)
         # A weak-substring fuzzy match means the doc word is really a PLACE the register lacks —
@@ -745,6 +751,16 @@ def osm_fallback_pass(pending, station_muni, muni_bounds, muni_name,
             geom = shapely.make_valid(geom.intersection(clip).buffer(0))
             if geom.is_empty:
                 continue
+        # Geographic sanity: a common street name often geocodes to a same-named place far from
+        # this station's real coverage (a polygon over another town's centre). Reject the claim
+        # when it sits farther than OSM_MAX_COVERAGE_DIST_M from every resolved-street centroid
+        # the station already has. Stations with no resolved coverage have no anchor -> exempt.
+        anchor_pts = resolved_by_station.get(r["station_id"])
+        if anchor_pts:
+            d = min(geom.distance(shapely.Point(px, py)) for px, py in anchor_pts)
+            if d > config.OSM_MAX_COVERAGE_DIST_M:
+                n_far += 1
+                continue
         # Hit: if this was a (wrong) fuzzy street match, pull its already-emitted claims so the
         # OSM geometry — not the substring street's addresses — becomes the coverage.
         old_sid = r["street_id"]
@@ -761,6 +777,8 @@ def osm_fallback_pass(pending, station_muni, muni_bounds, muni_name,
         })
         # Resolved by OSM: no register street/address links, the geometry is the coverage.
         r["method"], r["score"], r["amb_ids"], r["street_id"] = "osm", 50.0, [], None
+    if n_far:
+        print(f"  OSM claims rejected as far from coverage: {n_far:,}")
     return osm_claims
 
 
@@ -1013,7 +1031,7 @@ def main() -> int:
         m = pl.read_parquet(config.MUNICIPALITIES_PARQUET)
         muni_name = dict(zip(m["id"], m["name_lat"]))
         osm_claims = osm_fallback_pass(osm_pending, station_muni, muni_bounds, muni_name,
-                                       claims_by_street, street_meta)
+                                       claims_by_street, street_meta, resolved_by_station)
         osm.flush_cache()
         if osm_claims:
             print(f"  OSM fallback matches: {len(osm_claims):,}")

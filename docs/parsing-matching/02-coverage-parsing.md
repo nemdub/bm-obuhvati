@@ -421,6 +421,7 @@ dialect detection):
 | `_NUM_DO_DASH` | split a dash standing in for `од … до` | `98-до краја` → `98 до краја` (see 2.12) |
 | `_DASH_SPACE` | collapse spaces around a range dash, **digits only** | `2- 100`, `2 - 100` → `2-100` |
 | `_ORDINAL_GLUE` | split an ordinal glued to the next word | `7.јула` → `7. јула` |
+| `_HOUSE_NUM_DOT` | drop a house number's trailing dot in a number context | `52. и 54.` → `52 и 54` |
 
 - **`_LIST_PREAMBLE_RE`** strips up to and including a `…у улиц(и|ама):` marker. Some docs
   (Беочин) prefix the list with a sentence ("voters residing in MZ … in the street(s):") that
@@ -436,4 +437,11 @@ dialect detection):
   `-`, `100`).
 - **`_ORDINAL_GLUE`** keeps a glued ordinal in the street name: `7.јула 1-10` → street
   `7. јула`, interval `[1, 10, 'all']` (otherwise `7` would look like a house number).
+- **`_HOUSE_NUM_DOT`** strips the trailing dot from a house number written `52.`/`54.` so it is
+  no longer mistaken for a list ordinal (`is_house_token` rejects `^\d+\.$`). Fires **only** in a
+  number-side context — when the dot is followed by a list separator (`,`/`;`/`и`), another
+  number, or end of text — so an ordinal name word after it is untouched: `Церских јунака 52. и
+  54.` → houses `52`, `54`, but `8. Март`, `7. јула`, `Краља Петра 2. део` keep their number in
+  the name. Without this, `52.` glued into the street name and `54.` became a phantom segment
+  that the OSM fallback then geocoded to an unrelated place (see [05](05-street-resolution.md)).
 

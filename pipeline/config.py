@@ -109,6 +109,12 @@ NOMINATIM_USER_AGENT = "bm-obuhvati/1.0 (https://github.com/dubravac-nemanja/bm-
 NOMINATIM_RATE_LIMIT_S = 1.0        # min seconds between live calls (public policy: <=1 req/s)
 OSM_STREET_BUFFER_M = 40.0          # half-width buffer for a geocoded street LineString
 OSM_POINT_BUFFER_M = 300.0          # radius buffer for a geocoded place node with no area
+# Geographic sanity check on a geocoded OSM claim: a common street name (e.g. "Маршала Тита")
+# resolves to a same-named place elsewhere in the municipality, dropping a polygon far from the
+# station's real coverage. Reject an OSM claim that sits farther than this from EVERY resolved-
+# street centroid the station already has. Stations with no resolved coverage have no anchor and
+# are exempt (OSM is then the only signal). ~3 km mirrors PROXIMITY_RADIUS_CAP_M.
+OSM_MAX_COVERAGE_DIST_M = 3000.0
 
 # ── Manual overrides for doc filename -> municipality (Latin register name). ──
 # Auto-matching in stage02 handles most files; add corrections here when the

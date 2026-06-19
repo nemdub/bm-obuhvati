@@ -376,6 +376,20 @@ bbox** (`viewbox` + `bounded=1`, from `load_muni_boundaries()`) plus a structure
 `city`/`county` = muni name. That returns *Sombor's* Жарковац, not Ruma's. The result geometry
 is then **clipped to the municipality boundary** as a second guard.
 
+**Two more guards against drawing the wrong place** (a municipality can be large, so the bbox
+scope alone still lets a common street name land on a same-named place in another town):
+
+- **No letterless query.** A name with no alphabetic characters (a bare `54` left by a mis-parsed
+  house number, see [02](02-coverage-parsing.md) §2.15) is never geocoded — Nominatim would
+  resolve it to an unrelated numbered admin relation.
+- **Distance to the station's own coverage.** When the station already has resolved-street
+  coverage, an OSM claim farther than `OSM_MAX_COVERAGE_DIST_M` (≈3 km, mirroring
+  `PROXIMITY_RADIUS_CAP_M`) from **every** resolved-street centroid is rejected — it left the
+  station's real neighbourhood (a polygon over another town's centre). Stations with no resolved
+  coverage have no anchor and are exempt (OSM is then the only signal). Rejected segments stay
+  unresolved and flagged — an honest coverage gap, never a wrong far-away polygon. stage04 prints
+  the rejection count (`OSM claims rejected as far from coverage`).
+
 **Geometry is the coverage.** There is no register street id and no address links — stage05
 draws the OSM geometry directly (unioned with any point-Voronoi cells the station also has),
 exactly like a whole-settlement claim. An OSM **area** is used as-is; a **street LineString**

@@ -469,6 +469,12 @@ _DASH_SPACE = re.compile(r"(\d)\s*[-–]\s*(\d)")
 # Ordinal glued to the following word ("7.јула", "1.маја", "10.октобра") — split so "7." is
 # seen as an ordinal (street-name part) instead of a house number "7" + junk.
 _ORDINAL_GLUE = re.compile(r"(\d+\.)([А-Яа-яЂ-џA-Za-z])")
+# A house number written with a trailing dot ("Церских јунака 52. и 54."). The "\d+\." form is
+# normally treated as a list ordinal (so "8. Март" keeps its number in the name), but here the
+# dot is just punctuation on a house number. Strip it ONLY when the number sits in a number-side
+# context — followed by a list separator (",", ";", "и"), another number, or end of text — never
+# when an ordinal name word follows ("8. Март", "7. јула" are untouched: a letter follows).
+_HOUSE_NUM_DOT = re.compile(r"(\d+)\.(?=\s*(?:[,;]|и\b|\d|$))")
 # A dash used in place of the "од … до" range form glues the lower bound onto "до": "98-до
 # краја" means "од 98 до краја" (98 to the end of the street). Split the dash off so the
 # "N до краја" / "N до M" grammar (_add_numbers, 2.12) sees it. Only when "до" follows a
@@ -495,5 +501,6 @@ def parse_coverage(text: str, is_street=None) -> list[Segment]:
     text = _NUM_DO_DASH.sub(r"\1 \2", text)
     text = _DASH_SPACE.sub(r"\1-\2", text)
     text = _ORDINAL_GLUE.sub(r"\1 \2", text)
+    text = _HOUSE_NUM_DOT.sub(r"\1", text)
     is_structured = bool(_ULICA.search(text) and _BROJEVI.search(text))
     return parse_structured(text) if is_structured else parse_compact(text, is_street=is_street)

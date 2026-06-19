@@ -178,10 +178,10 @@ class TestOsmFallbackPass:
         return {"id": sid, "station_id": 800, "street_raw": raw,
                 "method": method, "score": 0.0, "amb_ids": [], "street_id": street_id}
 
-    def _run(self, segs, claims_by_street=None, street_meta=None):
+    def _run(self, segs, claims_by_street=None, street_meta=None, resolved_by_station=None):
         return S4.osm_fallback_pass(segs, self.STATION_MUNI, self._bounds(), self.MUNI_NAME,
                                     claims_by_street if claims_by_street is not None else {},
-                                    street_meta or {})
+                                    street_meta or {}, resolved_by_station or {})
 
     def test_hit_emits_claim_and_marks_osm(self, monkeypatch):
         monkeypatch.setattr(osm, "geocode", lambda kind, name, mid, mname, vb: (
@@ -237,6 +237,27 @@ class TestOsmFallbackPass:
         claims = self._run([seg], claims_by_street, meta)
         assert claims == [] and seg["method"] == "fuzzy" and seg["street_id"] == "ST"
         assert claims_by_street == {"ST": [{"seg_id": 8000000005}]}  # claim untouched
+
+    def test_far_claim_rejected_when_station_has_anchor(self, monkeypatch):
+        # The OSM hit lands on the Sombor polygon, but the station's resolved coverage is ~19 km
+        # east — far beyond OSM_MAX_COVERAGE_DIST_M — so the claim is rejected as a mis-geocode.
+        monkeypatch.setattr(osm, "geocode", lambda kind, *a, **k: (
+            {"osm_type": "relation", "osm_id": 7, "geojson": SOMBOR_GEOJSON_POLY}
+            if kind == "settlement" else None))
+        far = osm._TO_UTM.transform(19.35, 45.77)  # ~19 km east of the polygon
+        seg = self._seg(8000000006, "Маршала Тита")
+        claims = self._run([seg], resolved_by_station={800: [far]})
+        assert claims == [] and seg["method"] == "none"  # left unresolved, no far polygon
+
+    def test_near_claim_kept_when_station_has_anchor(self, monkeypatch):
+        # Same hit, but the station's resolved coverage sits inside the polygon -> kept.
+        monkeypatch.setattr(osm, "geocode", lambda kind, *a, **k: (
+            {"osm_type": "relation", "osm_id": 7, "geojson": SOMBOR_GEOJSON_POLY}
+            if kind == "settlement" else None))
+        near = osm._TO_UTM.transform(SOMBOR_LON, SOMBOR_LAT)  # inside the polygon
+        seg = self._seg(8000000007, "Жарковац")
+        claims = self._run([seg], resolved_by_station={800: [near]})
+        assert len(claims) == 1 and seg["method"] == "osm"
 
 
 class TestWeakSubstringFuzzy:

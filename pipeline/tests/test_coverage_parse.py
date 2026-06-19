@@ -439,6 +439,18 @@ class TestTextPreprocessing:
         segs = parse_coverage("Прва С-1")
         assert segs[0].unknown_tokens == ["С-1"]
 
+    def test_dotted_house_numbers_in_list(self):
+        # "Церских јунака 52. и 54.": the trailing dots are punctuation on house numbers,
+        # not list ordinals — they parse as singles 52 and 54, one street.
+        segs = parse_coverage("Церских јунака 52. и 54.")
+        assert len(segs) == 1 and segs[0].street_raw == "Церских јунака"
+        assert segs[0].singles == [[52, ""], [54, ""]]
+
+    def test_dotted_house_numbers_do_not_break_ordinal_name(self):
+        # An ordinal followed by a WORD ("8. Март") keeps its number in the name.
+        segs = parse_coverage("8. Март 1-10")
+        assert segs[0].street_raw == "8. Март" and segs[0].intervals == [[1, 10, "all"]]
+
     def test_ordinal_glue_split_keeps_ordinal_in_name(self):
         # "7.јула" -> "7. јула": the ordinal stays part of the street name.
         segs = parse_coverage("7.јула 1-10")
