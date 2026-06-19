@@ -365,3 +365,39 @@ class TestMarkerScopes:
         segs = [self._seg(7003300000, "Копљаре", whole=False, singles=[[5, ""]]),
                 self._seg(7003300001, "Карађорђева")]
         assert build_marker_scopes(segs, station_muni, exact) == {}
+
+
+class TestSettlementEditDistance:
+    """resolve_settlement: a single-edit (declension/typo) settlement name resolves; two
+    edits or short names do not."""
+
+    def _sbm(self, *names):
+        # names -> {"M": [(sid, NORM), ...]}
+        return {"M": [(f"s{i}", n) for i, n in enumerate(names)]}
+
+    def test_declension_e_to_i_matches(self):
+        from stage04_match_addresses import resolve_settlement
+        sbm = self._sbm("КОПЉАРЕ", "ВУКОСАВЦИ", "ГАРАШИ")
+        assert resolve_settlement("Копљари", "M", sbm) == "s0"  # КОПЉАРИ -> КОПЉАРЕ
+
+    def test_single_typo_matches(self):
+        from stage04_match_addresses import resolve_settlement
+        sbm = self._sbm("ШАИНОВАЦ", "БУКОВИК")
+        assert resolve_settlement("Шаинивац", "M", sbm) == "s0"
+
+    def test_two_edits_distinguishing_word_rejected(self):
+        # "ДОЊА ГРАБОВИЦА" must NOT match "ГОРЊА ГРАБОВИЦА" (distance 2 — different place).
+        from stage04_match_addresses import resolve_settlement
+        sbm = self._sbm("ГОРЊА ГРАБОВИЦА", "НЕШТО ДРУГО")
+        assert resolve_settlement("Доња Грабовица", "M", sbm) is None
+
+    def test_short_name_single_edit_rejected(self):
+        # A single edit on a short name can flip identity (БОР/БАР) — below the length floor.
+        from stage04_match_addresses import resolve_settlement
+        sbm = self._sbm("БАР", "НИШ")
+        assert resolve_settlement("Бор", "M", sbm) is None
+
+    def test_ambiguous_two_within_one_edit_rejected(self):
+        from stage04_match_addresses import resolve_settlement
+        sbm = self._sbm("МИЛОШЕВО", "МИЛАШЕВО")  # both 1 edit from МИЛИШЕВО
+        assert resolve_settlement("Милишево", "M", sbm) is None

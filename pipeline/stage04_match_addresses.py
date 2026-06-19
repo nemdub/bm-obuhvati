@@ -44,6 +44,7 @@ from collections import defaultdict
 import numpy as np
 import polars as pl
 from rapidfuzz import fuzz, process
+from rapidfuzz.distance import DamerauLevenshtein
 from scipy.spatial import cKDTree
 
 import config
@@ -53,6 +54,9 @@ from common.coverage_parse import interval_parity
 from common.normalize import genitive_variants, normalize_street, suffix_rank
 
 FUZZY_MIN = config.STREET_FUZZY_MIN
+# Min name length for the single-edit (Damerau ≤1) settlement match — below this a single edit
+# can flip identity (БОР/БАР), above it it is overwhelmingly a declension or typo.
+SETT_EDIT_MIN_LEN = 6
 
 
 def resolve_settlement_from_address(address: str, muni: str, settlements_by_muni) -> str | None:
@@ -171,6 +175,19 @@ def resolve_settlement(settlement_raw, muni, settlements_by_muni) -> str | None:
         best = process.extractOne(target, [n for _, n in cands], scorer=fuzz.WRatio)
         if best and best[1] >= FUZZY_MIN:
             return cands[best[2]][0]
+        # Near-miss declension / typo: a station address often uses a DECLINED settlement name
+        # ("КОПЉАРИ" for register "КОПЉАРЕ", "ВЕНЧАНИ"/"ВЕНЧАНЕ") or a single mistyped letter
+        # ("ШАИНИВАЦ"/"ШАИНОВАЦ", "НАФРЉЕ"/"НАДРЉЕ") that WRatio scores ~85 — below FUZZY_MIN.
+        # A SINGLE edit (Damerau, so transpositions count as one) is a typo/inflection; TWO
+        # edits already separate genuinely different places ("ДОЊА" vs "ГОРЊА ГРАБОВИЦА" = 2,
+        # "ТОПОЛА ВАРОШ" vs "ВАРОШИЦА" = 3). Accept distance ≤ 1 only, and only when it is the
+        # UNIQUE such settlement and both names are ≥ SETT_EDIT_MIN_LEN chars (a single edit on
+        # a short name can flip identity). Nationwide: 9 stations, 0 false positives.
+        if len(target) >= SETT_EDIT_MIN_LEN:
+            close = [sid for sid, norm in cands
+                     if abs(len(norm) - len(target)) <= 1 and DamerauLevenshtein.distance(target, norm) <= 1]
+            if len(close) == 1:
+                return close[0]
         # Unique word-containment: station addresses say "ЗЕМУН, ..." while the register
         # settlement is "БЕОГРАД (ЗЕМУН)" — WRatio length-penalizes that below threshold.
         tw = set(target.split())

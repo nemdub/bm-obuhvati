@@ -88,10 +88,21 @@ stations are untouched.
 
 1. **Exact** normalized name match within the muni's settlements.
 2. Else `rapidfuzz.WRatio` best ≥ `FUZZY_MIN` (90).
-3. Else **unique word‑containment**: the target's word set ⊆ a settlement's word set, and
+3. Else **single‑edit (Damerau‑Levenshtein ≤ 1)**, when the match is **unique** and both names
+   are ≥ `SETT_EDIT_MIN_LEN` (6) chars. Addresses use a **declined** settlement name (`КОПЉАРИ`
+   for register `КОПЉАРЕ`, `ВЕНЧАНИ`/`ВЕНЧАНЕ`) or a **single mistyped letter** (`ШАИНИВАЦ`/
+   `ШАИНОВАЦ`, `НАФРЉЕ`/`НАДРЉЕ`) that WRatio scores ~85 — below 90. One edit (Damerau, so a
+   transposition counts as one) is a typo/inflection; **two** edits already separate genuinely
+   different places — `ДОЊА` vs `ГОРЊА ГРАБОВИЦА` is 2, `ТОПОЛА ВАРОШ` vs `ВАРОШИЦА` is 3 — so the
+   distance‑1 ceiling is the guard. The length floor blocks short‑name flips (`БОР`/`БАР`), and
+   the uniqueness test blocks a target one edit from two settlements at once. Nationwide: **9
+   stations** newly resolve their home settlement, **0 false positives** (verified against every
+   sub‑90 near‑miss); the other ~970 inferred‑home stations are genuine town addresses (best
+   match < 70) and are correctly left to the eponymous‑town inference (5.1.1).
+4. Else **unique word‑containment**: the target's word set ⊆ a settlement's word set, and
    **exactly one** settlement qualifies → that one. (Station addresses say `ЗЕМУН, …` while
    the register settlement is `БЕОГРАД (ЗЕМУН)`; WRatio length‑penalizes below 90.)
-4. Else `None`.
+5. Else `None`.
 
 ## 5.2 Alternate keys built per settlement (`build_indexes`)
 
