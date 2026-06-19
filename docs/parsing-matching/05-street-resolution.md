@@ -58,6 +58,32 @@ untouched — the inference only adds a fallback when address resolution returns
 > left the review queue outright. Newly‑resolved streets that several town stations share
 > surface as honest `conflict` review items (previously hidden because nothing resolved).
 
+### 5.1.2 Coverage settlement markers (`seg_marker_sett`, stage04 pass 1)
+
+**Rule:** in rural docs the compact list **names a settlement, then lists its streets**
+(`Копљаре, Бранислава Нушића, Карађорђева, Косовска, …`). Like `Насеље:` in the structured
+dialect, that bare settlement name **scopes the streets that follow it** to that settlement. A
+pre‑pass walks each station's segments in id (document) order: a **whole‑street** segment whose
+normalized name is **exactly** a settlement of the muni becomes the current marker, recorded for
+every later segment (`seg_marker_sett`).
+
+The marker overrides **only an inferred town home** (5.1.1) — never a real address‑resolved
+settlement — and sets `settlement_inferred = False` so the muni‑wide fuzzy last resort (5.6) no
+longer fires for those segments.
+
+#### Why
+
+The home settlement comes from the address, but a rural address is often a *declined* form the
+fuzzy match misses: Копљаре station's address `КОПЉАРИ` scores WRatio 85.7 against settlement
+`КОПЉАРЕ` — below `FUZZY_MIN` (90) — so its home settlement was **inferred as the eponymous town
+`АРАНЂЕЛОВАЦ`**. Its streets (`Карађорђева`, `Косовска`, `Николе Тесле` — names that also exist
+in the town) then resolved muni‑wide to the **town's** streets, and a whole manual re‑assign was
+needed. The coverage's first entry `Копљаре` **is** the exact settlement name, so it pins the
+scope: all 23 streets now resolve `exact` in `КОПЉАРЕ`. Nationwide: **24 stations across 15
+municipalities** (the rural village‑then‑streets pattern), **+344 links, −31 conflicts, −43
+review flags**. Gated to inferred‑town homes and exact settlement names, so address‑resolved
+stations are untouched.
+
 ### `resolve_settlement(raw, muni, settlements_by_muni)`
 
 1. **Exact** normalized name match within the muni's settlements.

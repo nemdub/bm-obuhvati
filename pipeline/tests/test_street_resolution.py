@@ -325,3 +325,43 @@ class TestNearestUnclaimed:
         # Two different streets exactly the same distance away -> don't guess.
         cands = [("a", ns("Дунавска"), 100.0, 0.0), ("b", ns("Дунавска"), -100.0, 0.0)]
         assert S4._nearest_unclaimed(self.ANCHOR, cands, None) is None
+
+
+class TestMarkerScopes:
+    """build_marker_scopes: a bare settlement name scopes the streets that follow it."""
+
+    @staticmethod
+    def _seg(sid, raw, whole=True, intervals=None, singles=None):
+        import json as _j
+        p = {"whole": whole, "intervals": intervals or [], "singles": singles or [],
+             "bez_broja": False, "unknown_tokens": []}
+        return {"id": sid, "station_id": sid // 1000, "street_raw": raw,
+                "parsed_json": _j.dumps(p, ensure_ascii=False)}
+
+    def test_leading_settlement_scopes_following_streets(self):
+        from stage04_match_addresses import build_marker_scopes
+        station_muni = {7003300: "70033"}
+        exact = {"70033": {"КОПЉАРЕ": "701521"}}
+        segs = [self._seg(7003300000, "Копљаре"),
+                self._seg(7003300001, "Карађорђева"),
+                self._seg(7003300002, "Косовска")]
+        scopes = build_marker_scopes(segs, station_muni, exact)
+        # the marker itself is NOT scoped; the two streets after it are scoped to КОПЉАРЕ
+        assert 7003300000 not in scopes
+        assert scopes[7003300001] == "701521" and scopes[7003300002] == "701521"
+
+    def test_non_settlement_first_segment_no_scope(self):
+        from stage04_match_addresses import build_marker_scopes
+        station_muni = {7003300: "70033"}
+        exact = {"70033": {"КОПЉАРЕ": "701521"}}
+        segs = [self._seg(7003300000, "Карађорђева"), self._seg(7003300001, "Косовска")]
+        assert build_marker_scopes(segs, station_muni, exact) == {}
+
+    def test_numbered_settlement_name_is_not_a_marker(self):
+        # A segment carrying house numbers is a street, never a settlement marker.
+        from stage04_match_addresses import build_marker_scopes
+        station_muni = {7003300: "70033"}
+        exact = {"70033": {"КОПЉАРЕ": "701521"}}
+        segs = [self._seg(7003300000, "Копљаре", whole=False, singles=[[5, ""]]),
+                self._seg(7003300001, "Карађорђева")]
+        assert build_marker_scopes(segs, station_muni, exact) == {}

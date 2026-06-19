@@ -180,6 +180,34 @@ def resolve_settlement(settlement_raw, muni, settlements_by_muni) -> str | None:
     return None
 
 
+def build_marker_scopes(segs, station_muni, sett_exact_by_muni) -> dict[int, str]:
+    """Coverage settlement markers -> {segment_id: marker settlement_id in effect}.
+
+    A rural compact list names a settlement then lists its streets ("Копљаре, Бранислава
+    Нушића, …"). Walking each station's segments in id (document) order, a WHOLE-street segment
+    whose normalized name is EXACTLY a settlement of the muni becomes the current marker; every
+    LATER segment records it. The marker segment itself gets the scope in effect before it (so it
+    still resolves as a settlement claim, not a street within itself). The caller applies a
+    marker only over an inferred-town home (see 5.1.2), so address-resolved stations are
+    untouched."""
+    by_station: dict[int, list[dict]] = defaultdict(list)
+    for s in segs:
+        by_station[s["station_id"]].append(s)
+    out: dict[int, str] = {}
+    for st, rows in by_station.items():
+        exact = sett_exact_by_muni.get(station_muni.get(st), {})
+        cur: str | None = None
+        for s in sorted(rows, key=lambda x: x["id"]):
+            if cur:
+                out[s["id"]] = cur
+            p = json.loads(s["parsed_json"])
+            if p.get("whole") or not (p.get("intervals") or p.get("singles")):
+                msid = exact.get(normalize_street(s["street_raw"] or ""))
+                if msid:
+                    cur = msid
+    return out
+
+
 def _strip_ulica(norm: str) -> str | None:
     """Drop a standalone 'УЛИЦА' word ("Поручничка улица" <-> register "ПОРУЧНИЧКА").
     Applied symmetrically (also as a register-side alternate, for names like
@@ -815,6 +843,22 @@ def main() -> int:
         overrides = {int(o["segment_id"]): o for o in json.loads(config.OVERRIDES_JSON.read_text())}
         print(f"  reviewer overrides loaded: {len(overrides):,}")
 
+    # Coverage settlement markers: in rural docs the compact list NAMES a settlement, then
+    # lists its streets ("Копљаре, Бранислава Нушића, Карађорђева, …"). Like "Насеље:" in the
+    # structured dialect, that bare settlement name scopes the streets that FOLLOW it to that
+    # settlement. Build, per segment, the marker settlement in effect (order-based, segment ids
+    # are positional). A marker is a whole-street segment whose name is EXACTLY a settlement of
+    # the municipality. Used only to override an INFERRED home (the eponymous-town fallback when
+    # the address settlement didn't resolve) — without it the village's streets, whose names
+    # also exist in the muni's town, fall back muni-wide and mis-match the town.
+    sett_exact_by_muni: dict[str, dict[str, str]] = {}
+    for _muni, _cands in settlements_by_muni.items():
+        d: dict[str, str] = {}
+        for _sid, _norm in _cands:
+            d.setdefault(_norm, _sid)
+        sett_exact_by_muni[_muni] = d
+    seg_marker_sett = build_marker_scopes(segs, station_muni, sett_exact_by_muni)
+
     # Pass 1: resolve a register street for every segment.
     seg_recs: list[dict] = []
     claims_by_street: dict[str, list[dict]] = {}
@@ -824,10 +868,15 @@ def main() -> int:
         # Scope to the segment's own settlement if labelled, else the station's home
         # settlement (from its address); falls back to municipality inside resolve_street.
         seg_sett = resolve_settlement(s["settlement_raw"], muni, settlements_by_muni)
-        settlement_id = seg_sett or station_settlement.get(s["station_id"])
-        # The scope is an INFERRED town only when neither the segment nor the address pinned
-        # a settlement — that's when the muni-wide fuzzy last resort still applies.
-        settlement_inferred = seg_sett is None and s["station_id"] in station_settlement_inferred
+        home_inferred = s["station_id"] in station_settlement_inferred
+        # A coverage settlement marker beats the eponymous-town guess (but never a real address
+        # settlement): it is an explicit in-document scope, so the streets resolve in the named
+        # village instead of mis-matching the same-named town streets.
+        marker_sett = seg_marker_sett.get(s["id"]) if home_inferred else None
+        settlement_id = seg_sett or marker_sett or station_settlement.get(s["station_id"])
+        # The scope is an INFERRED town only when neither the segment, a marker, nor the address
+        # pinned a settlement — that's when the muni-wide fuzzy last resort still applies.
+        settlement_inferred = seg_sett is None and marker_sett is None and home_inferred
         street_id, method, score, amb_ids = resolve_street(
             s["street_raw"], muni, settlement_id, idx, settlement_inferred)
 
