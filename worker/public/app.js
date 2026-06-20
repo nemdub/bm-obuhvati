@@ -432,10 +432,16 @@
     });
     actions.appendChild(save);
     actions.appendChild(reviewed);
-    // "Doesn't exist": for an unmatched street, confirm it's absent from the register
-    // and resolve the segment (no addresses/polygon are built for it).
-    if (!seg.street_resolved && !seg.street_missing) {
-      actions.appendChild(mkBtn(L_.doesNotExist, "btn", async () => {
+    // Resolve a segment to NO coverage (street_id "none"). Two situations, one mechanism:
+    //   - unmatched street: confirm it's absent from the register ("Улица не постоји");
+    //   - a wrong/unwanted match the reviewer wants to drop — e.g. a bare settlement name
+    //     that became a whole-settlement claim ("Паси Пољана") when other stations cover
+    //     parts of it ("Одбаци меч"). Shown for any flagged segment, not only unresolved
+    //     ones, so a resolved-but-wrong match can be discarded. Not offered once already
+    //     marked missing, nor for a clean (unflagged) exact match.
+    if (!seg.street_missing && (!seg.street_resolved || seg.needs_review)) {
+      const label = seg.street_resolved ? L_.discardMatch : L_.doesNotExist;
+      actions.appendChild(mkBtn(label, "btn", async () => {
         await fetch(`/api/segments/${seg.id}`, {
           method: "PUT", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ...editor.collect(true), street_id: "none" }),

@@ -23,6 +23,7 @@ export const STRINGS = {
   street: "Улица",
   streetUnresolved: "Улица није пронађена",
   doesNotExist: "Улица не постоји",
+  discardMatch: "Одбаци",
   streetMissing: "Означено: не постоји",
   wholeStreet: "Цела улица",
   bezBroja: "Без броја (бб)",
