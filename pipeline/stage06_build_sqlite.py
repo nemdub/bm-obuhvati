@@ -367,7 +367,7 @@ def write_muni_meta(df: pl.DataFrame, out: Path) -> int:
 # `polygons ⋈ polling_stations` row exactly, so the Worker serves them unchanged.
 R2_BLOB_COLS = [
     "station_id", "number", "name_cyr", "name_lat", "address_cyr", "address_lat",
-    "geojson", "area_m2", "point_count", "computed_at",
+    "geojson", "area_m2", "point_count", "computed_at", "osm",
 ]
 
 
@@ -428,6 +428,29 @@ def build_sqlite(present: dict[str, pl.DataFrame]) -> None:
     con.close()
 
 
+def strip_discarded_osm_reason(seg_df: pl.DataFrame) -> pl.DataFrame:
+    """Drop the 'osm_fallback' review reason from segments whose OSM estimate stage05 discarded
+    (overlapped other stations — see OSM_FOREIGN_REJECT_MIN). Otherwise the segment would still
+    advertise an "OSM estimate" with a polygon that was never drawn. If that was the only reason,
+    fall back to 'street_unresolved' so the (still street-less) segment stays honestly flagged."""
+    if not config.OSM_REJECTED_PARQUET.exists():
+        return seg_df
+    rejected = set(pl.read_parquet(config.OSM_REJECTED_PARQUET)["segment_id"].to_list())
+    if not rejected:
+        return seg_df
+
+    def fix(rr: str | None) -> str:
+        codes = [c for c in (rr or "").split(",") if c and c != "osm_fallback"]
+        return ",".join(codes) if codes else "street_unresolved"
+
+    return seg_df.with_columns(
+        pl.when(pl.col("id").is_in(list(rejected)))
+        .then(pl.col("review_reason").map_elements(fix, return_dtype=pl.Utf8))
+        .otherwise(pl.col("review_reason"))
+        .alias("review_reason")
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Assemble the D1 dataset (sqlite + import SQL).")
     ap.add_argument("--tables", help="Comma-separated subset of tables to build. Default: all present.")
@@ -457,6 +480,9 @@ def main() -> int:
 
     if not present:
         raise SystemExit("No stage artifacts found to build from.")
+
+    if "coverage_segments" in present:
+        present["coverage_segments"] = strip_discarded_osm_reason(present["coverage_segments"])
 
     # Incremental import: scoped DELETE+INSERT for the affected stations only.
     if municipalities is not None:

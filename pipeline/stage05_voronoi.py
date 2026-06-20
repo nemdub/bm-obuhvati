@@ -346,6 +346,11 @@ def main() -> int:
     # REJECTED when the geocoded shape runs over another station's coverage (see
     # `_osm_foreign_overlap` / OSM_FOREIGN_REJECT_MIN) — a whole-street OSM line drawn through a
     # neighbouring registered street would otherwise cover addresses that belong to other stations.
+    # Per-segment surviving OSM geometry (WGS84 GeoJSON), kept so the review UI can draw it
+    # distinctly and zoom to it — an OSM claim has no addresses, so the segment's polygon is the
+    # only thing to focus on. {station_id: [(segment_id, geojson_str), ...]}.
+    osm_by_station: dict[int, list[tuple[int, str]]] = {}
+    osm_rejected_ids: list[int] = []  # segment ids whose OSM estimate was discarded as overlapping
     n_osm_rejected = 0
     if config.OSM_CLAIMS_PARQUET.exists():
         oc = pl.read_parquet(config.OSM_CLAIMS_PARQUET)
@@ -354,7 +359,7 @@ def main() -> int:
         for (sid,), grp in oc.group_by("station_id"):
             sid = int(sid)
             geoms = []
-            for w in grp["wkt"].to_list():
+            for seg_id, w in zip(grp["segment_id"].to_list(), grp["wkt"].to_list()):
                 try:
                     g = shapely.make_valid(shapely.from_wkt(w))
                 except Exception:
@@ -364,8 +369,12 @@ def main() -> int:
                 own, other = _osm_foreign_overlap(g, sid, X, Y, sids_all, buckets, B)
                 if other >= config.OSM_FOREIGN_REJECT_MIN and other > own:
                     n_osm_rejected += 1
+                    osm_rejected_ids.append(int(seg_id))
                     continue
                 geoms.append(g)
+                osm_by_station.setdefault(sid, []).append((int(seg_id), json.dumps(
+                    mapping(to_wgs84(g.simplify(config.SIMPLIFY_TOL_M, preserve_topology=True))),
+                    ensure_ascii=False)))
             if geoms:
                 geoms += [claim_geom[sid]] if sid in claim_geom else []
                 claim_geom[sid] = geoms[0] if len(geoms) == 1 else unary_union(geoms)
@@ -418,12 +427,16 @@ def main() -> int:
             gj = json.dumps(mapping(wgs), ensure_ascii=False)
             if len(gj.encode()) <= 45_000:
                 break
+        osm_segs = osm_by_station.get(sid)
         rows.append({
             "station_id": sid,
             "geojson": gj,
             "area_m2": round(area, 1),
             "point_count": None,
             "computed_at": now,
+            # Per-segment OSM claim geometry for the UI ({segment_id, geojson}); null when none.
+            "osm": json.dumps([{"segment_id": s, "geojson": json.loads(g)} for s, g in osm_segs],
+                              ensure_ascii=False) if osm_segs else None,
         })
 
     # point_count per station from links.
@@ -448,6 +461,19 @@ def main() -> int:
             out = kept
         out.write_parquet(config.POLYGONS_PARQUET)
         n_total = out.height
+
+    # Segment ids whose OSM estimate was discarded (overlapped other stations) — stage06 strips
+    # the 'osm_fallback' review reason from these so they don't masquerade as drawn coverage.
+    # Merged like polygons: in scoped mode, replace only the affected stations' rows.
+    rej_df = pl.DataFrame({"segment_id": osm_rejected_ids}, schema={"segment_id": pl.Int64})
+    if affected is None:
+        rej_df.write_parquet(config.OSM_REJECTED_PARQUET)
+    elif config.OSM_REJECTED_PARQUET.exists():
+        prev = pl.read_parquet(config.OSM_REJECTED_PARQUET)
+        kept = prev.filter(~(pl.col("segment_id") // 1000).is_in(list(affected)))
+        pl.concat([kept, rej_df], how="vertical_relaxed").write_parquet(config.OSM_REJECTED_PARQUET)
+    else:
+        rej_df.write_parquet(config.OSM_REJECTED_PARQUET)
 
     # Simplified boundary copy for the review-UI overlay (stage06 ships it to D1).
     brows = [

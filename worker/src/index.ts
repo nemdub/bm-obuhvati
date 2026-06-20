@@ -433,6 +433,8 @@ app.get("/api/s/:id/polygon.geojson", async (c) => {
     meta: self ? { area_m2: self.area_m2, point_count: self.point_count, computed_at: self.computed_at } : null,
     neighbors: neighbors.map((n) => JSON.parse(n.geojson)),
     boundaries: bounds.map((b) => JSON.parse(b.geojson)),
+    // Per-segment OSM-fallback shapes (no addresses): the UI draws/zooms them by segment_id.
+    osm: self?.osm ? JSON.parse(self.osm) : [],
   });
 });
 

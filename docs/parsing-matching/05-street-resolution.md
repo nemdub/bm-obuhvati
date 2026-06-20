@@ -476,7 +476,11 @@ split own vs other; the claim is **dropped** when it contains ≥ `OSM_FOREIGN_R
 foreign matched addresses AND more foreign than own (a legitimate register-gap claim sits on
 addresses the register *lacks*, so few/no foreign points fall inside it). A claim where the
 station has the larger share — e.g. a real settlement polygon covering its own village plus a few
-neighbours — is kept. Prints `OSM claims rejected (overlap other stations' coverage)`.
+neighbours — is kept. Prints `OSM claims rejected (overlap other stations' coverage)`. The
+rejected segment ids are written to `osm_rejected.parquet`; **stage06 then strips `osm_fallback`
+from their `review_reason`** (falling back to `street_unresolved` if it was the only flag) so a
+discarded estimate doesn't keep advertising an "OSM estimate" with a polygon that was never
+drawn — the segment shows as the `named_block` / unresolved gap it actually is.
 
 **Geometry is the coverage.** There is no register street id and no address links — stage05
 draws the OSM geometry directly (unioned with any point-Voronoi cells the station also has),
@@ -486,6 +490,13 @@ is buffered by `OSM_STREET_BUFFER_M`, a bare **place node** by `OSM_POINT_BUFFER
 buffered point/line is an approximation a human should confirm or redraw. The review note tells
 the reviewer how to remove it (clear coverage / "doesn't exist") and that the map updates on the
 next recompute (OSM polygons live in the stored R2 layer, not the live point preview).
+
+**Per-segment geometry for the UI.** Because an OSM segment has no addresses, the review map can't
+fit it from points. So the **surviving** OSM shapes are kept per segment (WGS84) — stage05
+attaches `{segment_id, geojson}` to each station's polygon row (`osm` field), shipped in the R2
+blob and served by `/api/s/:id/polygon.geojson` (`osm: [...]`). The frontend draws them distinctly
+(orange dashed) and **clicking a review card zooms to its OSM shape** (`focusSegment`), instead of
+only the "no addresses" toast.
 
 **Caching (committed) & offline mode.** Every Nominatim response — hit *or* miss — is cached
 in `data/osm_cache.json`, keyed `kind|muni_id|normalized_name`, and **committed to the repo**,

@@ -12,7 +12,7 @@
   }).addTo(map);
   map.setView([44.0, 20.9], 7);
 
-  let pointsLayer = null, polygonLayer = null, neighborsLayer = null, boundaryLayer = null, streetLinesLayer = null;
+  let pointsLayer = null, polygonLayer = null, neighborsLayer = null, boundaryLayer = null, streetLinesLayer = null, osmLayer = null;
   let highlightSeg = null;
 
   function pointStyle(f) {
@@ -80,6 +80,10 @@
     if (streetLinesLayer) streetLinesLayer.eachLayer((l) => {
       if (l.feature && l.feature.properties.segment_id === segId) bounds.extend(l.getBounds());
     });
+    // OSM-fallback segments have no addresses either — zoom to their geocoded shape.
+    if (osmLayer) osmLayer.eachLayer((l) => {
+      if (l.feature && l.feature.properties.segment_id === segId) bounds.extend(l.getBounds());
+    });
     if (bounds.isValid()) {
       map.fitBounds(bounds, { padding: [40, 40], maxZoom: 17 });
     } else {
@@ -109,6 +113,14 @@
 
     if (streetLinesLayer) map.removeLayer(streetLinesLayer);
     streetLinesLayer = L.geoJSON(lines, { style: streetLineStyle }).addTo(map);
+
+    // OSM-fallback shapes (no addresses) — drawn distinctly so the reviewer sees the estimate,
+    // and tagged with segment_id so clicking the review card can zoom to it.
+    if (osmLayer) map.removeLayer(osmLayer);
+    osmLayer = L.geoJSON(
+      { type: "FeatureCollection", features: (poly.osm || []).map((o) => ({ type: "Feature", properties: { segment_id: o.segment_id }, geometry: o.geojson })) },
+      { style: { color: "#ef6c00", weight: 2, fillColor: "#ff9800", fillOpacity: 0.18, dashArray: "5 4" } }
+    ).addTo(map);
 
     if (pointsLayer) map.removeLayer(pointsLayer);
     pointsLayer = L.geoJSON(pts, {

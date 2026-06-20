@@ -338,6 +338,9 @@ export interface PolyRow {
   area_m2: number;
   point_count: number;
   computed_at: string;
+  // Per-segment OSM-fallback claim geometry, as a JSON string `[{segment_id, geojson}]` (or
+  // null). These shapes have no addresses, so the review UI uses them to draw/zoom an OSM match.
+  osm?: string | null;
 }
 
 /** Read a municipality's polygon blob from R2 (polygons/m/<muniId>.json). Polygons are

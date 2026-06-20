@@ -102,6 +102,7 @@ STREET_FUZZY_PROX_MIN = 90          # name-similarity cutoff for the proximity f
 # pipeline/common/osm.py and docs/parsing-matching/05-street-resolution.md.
 OSM_CACHE_JSON = DATA_DIR / "osm_cache.json"            # committed Nominatim response cache
 OSM_CLAIMS_PARQUET = ARTIFACTS_DIR / "osm_claims.parquet"  # station_id -> OSM coverage geometry (UTM WKT)
+OSM_REJECTED_PARQUET = ARTIFACTS_DIR / "osm_rejected.parquet"  # segment ids whose OSM estimate stage05 discarded
 # Public Nominatim by default; point NOMINATIM_URL at a self-hosted instance to avoid the
 # public service's 1 req/s policy. A descriptive User-Agent is required by that policy.
 NOMINATIM_URL = "https://nominatim.openstreetmap.org"
