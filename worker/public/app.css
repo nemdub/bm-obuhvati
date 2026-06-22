@@ -54,6 +54,8 @@ th.sortable .arrow { font-size: 10px; color: var(--blue); }
 .street-item.area { font-weight: 600; }
 tr.city-head td { font-weight: 700; background: #f1f4f7; }
 tr.city-child td:first-child { padding-left: 30px; }
+tr.section-head td { font-weight: 700; background: #eef2f6; color: var(--muted, #555);
+  text-transform: uppercase; letter-spacing: .04em; font-size: 12px; }
 
 .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; margin-left: 6px; vertical-align: middle; }
 .badge.warn { background: #fff0e0; color: var(--warn); }

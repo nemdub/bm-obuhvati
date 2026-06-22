@@ -276,3 +276,47 @@ class TestDeclaredCount:
     def test_count_regex_extracts_number(self):
         m = S2.COUNT_RE.search("одређује се 207 гласачких места")
         assert m and int(m.group(1)) == 207
+
+
+class TestSpecialAndOverrideDetection:
+    @pytest.mark.parametrize("name,is_special", [
+        ("resenje o odredjivanju glasackih mesta -inostranstvo.doc", True),
+        ("Resenje o odredjivanju glasackih mesta u zavodima.doc", True),
+        ("Resenje o odredjivanju glasackih mesta za vojsku.docx", False),  # caught by MILITARY_RE
+        ("Pozarevac-glasacka-mesta.doc", False),
+    ])
+    def test_special_re(self, name, is_special):
+        assert bool(S2.SPECIAL_RE.search(name)) is is_special
+
+    @pytest.mark.parametrize("text,is_override", [
+        ("... одређује се измена ... уместо:\n98\n...", True),         # Palilula block
+        ("- редни број гласачког места 12 уместо:\n12", True),         # Čukarica per-station
+        ("Стари назив гласачког места:\n59", True),                    # Aleksinac
+        ("ред. бр. треба да стоји:", True),                            # Čukarica NEW marker
+        ("одређује се 68 гласачких места на територији Града", False), # ordinary base preamble
+    ])
+    def test_override_body_re(self, text, is_override):
+        assert bool(S2.OVERRIDE_BODY_RE.search(text)) is is_override
+
+
+class TestSectionLabels:
+    NAMES = {"70947": "ПОЖАРЕВАЦ", "71340": "КОСТОЛАЦ"}
+
+    def _rows(self, numbers):
+        # rows are (section_muni, number, name, address, coverage)
+        return [(None, n, f"BM{n}", "addr", "cov") for n in numbers]
+
+    def test_number_reset_splits_into_city_then_member(self, monkeypatch):
+        # 1..3 (city) then 1..2 (Kostolac) → first block ПОЖАРЕВАЦ, second КОСТОЛАЦ.
+        rows = self._rows([1, 2, 3, 1, 2])
+        labels = S2.section_labels_for_rows(rows, "70947", self.NAMES)
+        assert labels == ["ПОЖАРЕВАЦ", "ПОЖАРЕВАЦ", "ПОЖАРЕВАЦ", "КОСТОЛАЦ", "КОСТОЛАЦ"]
+
+    def test_no_reset_single_table_unlabelled(self):
+        # Continuous numbering (Vranje-style) → no member sub-table → no labels.
+        rows = self._rows([1, 2, 3, 4])
+        assert S2.section_labels_for_rows(rows, "70947", self.NAMES) == [None, None, None, None]
+
+    def test_non_rep_muni_never_labelled(self):
+        rows = self._rows([1, 2, 1])
+        assert S2.section_labels_for_rows(rows, "80365", self.NAMES) == [None, None, None]

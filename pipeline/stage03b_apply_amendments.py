@@ -23,6 +23,12 @@ import polars as pl
 import config
 from common.coverage_parse import Segment, parse_number_token
 from common.normalize import normalize_street
+from common.transliterate import cyr_to_lat
+from stage02_extract_docs import rows_from_docx, textutil, collapse, _is_lat_restatement
+from stage03_parse_coverage import build_muni_street_index, segments_for_station
+
+_LAT_CH = re.compile(r"[A-Za-zČĆŽŠĐčćžšđ]")
+_CYR_CH = re.compile(r"[А-Яа-яЂЈЉЊЋЏђјљњћџ]")
 
 BULLET = re.compile(r"Гласачко место број\s+(\d+)")
 Q = r"[„“\"']"  # Serbian/ASCII quotes
@@ -63,6 +69,70 @@ def parse_bullet(text: str) -> dict | None:
     return None
 
 
+# ── `уместо / одређује се` whole-station replacements ────────────────────────
+# The dominant amendment format (27 docs, e.g. Palilula/Čukarica/Aleksinac) reprints a
+# station's full row twice: an OLD table (`уместо:` / `Стари назив` / `… N уместо:`) then a
+# NEW table (`одређује се:` / `Треба да стоји:` / `Нови назив`), keyed by the printed number.
+# We read the doc's Word table via HTML (clean <td> columns — robust to names that wrap onto
+# several lines, which the linearized txt mis-splits). In document order the FIRST data row
+# for a number is the OLD record, the SECOND is the NEW one. A replacement is emitted only
+# when a field actually changed, so ordinary (non-replacement) amendment tables are ignored.
+
+
+def _changed(a: str, b: str) -> bool:
+    return collapse(a) != collapse(b)
+
+
+def _cell_is_dual_script(cell: str) -> bool:
+    """True for a `Назив Naziv` cell that restates its Cyrillic content in Latin — the HTML
+    table keeps both scripts (Tutin / Sjenica / Prijepolje). The txt base parser de-dups these;
+    here we just detect them so a replacement isn't built from doubled text."""
+    toks = cell.split()
+    for i in range(1, len(toks)):
+        if _LAT_CH.search(toks[i]) and not _CYR_CH.search(toks[i]):
+            cyr, lat = " ".join(toks[:i]), " ".join(toks[i:])
+            if _CYR_CH.search(cyr) and _is_lat_restatement(cyr, lat):
+                return True
+    return False
+
+
+def replacements_from_rows(rows: list) -> list[dict]:
+    """Pure core of `parse_replacement_doc`: pair each station number's OLD (first) and NEW
+    (last) table row and emit an op when a field changed. `rows` is rows_from_docx output:
+    (section, number, name, address, coverage)."""
+    # Dual-script docs (Tutin/Sjenica/Prijepolje) carry both scripts per HTML cell; skip them
+    # so a replacement isn't built from doubled text (base coverage stays loaded — no regression).
+    names = [name for *_, name, _, _ in rows if name.strip()]
+    if names and sum(_cell_is_dual_script(n) for n in names) * 2 >= len(names):
+        return []
+    by_num: dict[int, list[tuple[str, str, str]]] = {}
+    for _, num, name, address, coverage in rows:
+        by_num.setdefault(num, []).append((name, address, coverage))
+    ops: list[dict] = []
+    for num, recs in by_num.items():
+        if len(recs) < 2:
+            continue  # no old/new pair → not a replacement (additions, reprints, bullets)
+        (o_name, o_addr, o_cov), (n_name, n_addr, n_cov) = recs[0], recs[-1]
+        if not (_changed(o_name, n_name) or _changed(o_addr, n_addr) or _changed(o_cov, n_cov)):
+            continue  # identical reprint
+        ops.append({
+            "number": num,
+            "old_name": o_name, "old_address": o_addr, "old_coverage": o_cov,
+            "new_name": n_name, "new_address": n_addr, "new_coverage": n_cov,
+        })
+    return ops
+
+
+def parse_replacement_doc(path) -> list[dict]:
+    """Parse `уместо/одређује се` whole-station replacements from an amendment doc's Word
+    table (read as HTML for clean columns). Returns ops {number, old_*, new_*}."""
+    try:
+        rows = rows_from_docx(textutil(path, "html"))
+    except Exception:
+        return []
+    return replacements_from_rows(rows)
+
+
 def main() -> int:
     config.ensure_artifacts()
     stations = pl.read_parquet(config.STATIONS_PARQUET)
@@ -71,6 +141,16 @@ def main() -> int:
     station_by_num: dict[tuple[str, int], int] = {}
     for sid, muni_id, num in zip(stations["id"], stations["municipality_id"], stations["number"]):
         station_by_num.setdefault((muni_id, num), sid)
+    # Per-station base metadata, for `replace_station` ops to compare against and patch.
+    station_meta: dict[int, dict] = {
+        r["id"]: r for r in stations.select(
+            "id", "municipality_id", "name_cyr", "address_cyr", "raw_coverage_text"
+        ).iter_rows(named=True)
+    }
+    # Register street index for re-parsing a replaced station's new coverage text.
+    muni_and_streets = build_muni_street_index(
+        pl.read_parquet(config.STREETS_PARQUET), pl.read_parquet(config.SETTLEMENTS_PARQUET)
+    )
 
     segs = pl.read_parquet(config.SEGMENTS_RAW_PARQUET).to_dicts()
     for s in segs:
@@ -84,6 +164,10 @@ def main() -> int:
 
     amend_audit: list[dict] = []
     touched_stations: set[int] = set()
+    # `replace_station` outputs: name/address patches and re-parsed coverage segments.
+    name_over: dict[int, dict] = {}
+    replaced_ids: set[int] = set()
+    replacement_segs: list[dict] = []
     amend_id = 1
 
     if config.AMENDMENTS_RAW_PARQUET.exists():
@@ -96,6 +180,51 @@ def main() -> int:
         if muni is None:
             continue
         text = doc["raw_text"]
+
+        # `уместо/одређује се` whole-station replacements (name / address / coverage).
+        for rep in parse_replacement_doc(config.DOCS_DIR / doc["source_file"]):
+            station_id = station_by_num.get((muni, rep["number"]))
+            if station_id is None:
+                continue
+            meta = station_meta[station_id]
+            patch: dict = {"o_name_cyr": None, "o_name_lat": None,
+                           "o_address_cyr": None, "o_address_lat": None}
+            if rep["new_name"] and _changed(rep["new_name"], meta["name_cyr"]):
+                patch["o_name_cyr"] = rep["new_name"]
+                patch["o_name_lat"] = cyr_to_lat(rep["new_name"])
+            if rep["new_address"] and _changed(rep["new_address"], meta["address_cyr"]):
+                patch["o_address_cyr"] = rep["new_address"]
+                patch["o_address_lat"] = cyr_to_lat(rep["new_address"])
+            if any(v is not None for v in patch.values()):
+                name_over[station_id] = patch
+
+            target_id = None
+            if rep["new_coverage"] and _changed(rep["new_coverage"], meta["raw_coverage_text"] or ""):
+                # Re-parse the corrected coverage and replace this station's base segments.
+                new_segs = segments_for_station(
+                    {"id": station_id, "municipality_id": meta["municipality_id"],
+                     "raw_coverage_text": rep["new_coverage"]},
+                    muni_and_streets,
+                )
+                for s in new_segs:
+                    s["source"] = "amendment"
+                    s["amendment_note"] = "уместо/одређује се"
+                    s["parsed"] = json.loads(s["parsed_json"])
+                replaced_ids.add(station_id)
+                replacement_segs.extend(new_segs)
+                target_id = new_segs[0]["id"] if new_segs else None
+
+            touched_stations.add(station_id)
+            amend_audit.append({
+                "id": amend_id, "municipality_id": muni, "station_number": rep["number"],
+                "street_raw": None, "op": "replace_station",
+                "old_value": f"{rep['old_name']} | {rep['old_address']}",
+                "new_value": f"{rep['new_name']} | {rep['new_address']}",
+                "raw_instruction": "уместо/одређује се", "source_file": doc["source_file"],
+                "applied": 1, "target_segment_id": target_id,
+            })
+            amend_id += 1
+
         anchors = list(BULLET.finditer(text))
         for k, anc in enumerate(anchors):
             station_number = int(anc.group(1))
@@ -157,6 +286,11 @@ def main() -> int:
             })
             amend_id += 1
 
+    # Swap in re-parsed coverage for `replace_station` stations (drop their base segments).
+    if replaced_ids:
+        segs = [s for s in segs if s["station_id"] not in replaced_ids]
+    segs.extend(replacement_segs)
+
     # Re-serialize parsed -> parsed_json, drop the working 'parsed' key.
     for s in segs:
         s["parsed_json"] = json.dumps(s["parsed"], ensure_ascii=False)
@@ -167,11 +301,23 @@ def main() -> int:
     pl.DataFrame(segs, infer_schema_length=None).select(cols).write_parquet(config.SEGMENTS_AMENDED_PARQUET)
     pl.DataFrame(amend_audit, infer_schema_length=None).write_parquet(config.AMENDMENTS_PARQUET)
 
-    # Flag amended stations.
+    # Flag amended stations and apply `replace_station` name/address patches.
     stations = pl.read_parquet(config.STATIONS_PARQUET).with_columns(
         pl.when(pl.col("id").is_in(list(touched_stations))).then(1).otherwise(pl.col("is_amendment"))
         .alias("is_amendment")
     )
+    if name_over:
+        ov = pl.DataFrame([{"id": sid, **patch} for sid, patch in name_over.items()])
+        stations = (
+            stations.join(ov, on="id", how="left")
+            .with_columns(
+                pl.coalesce("o_name_cyr", "name_cyr").alias("name_cyr"),
+                pl.coalesce("o_name_lat", "name_lat").alias("name_lat"),
+                pl.coalesce("o_address_cyr", "address_cyr").alias("address_cyr"),
+                pl.coalesce("o_address_lat", "address_lat").alias("address_lat"),
+            )
+            .drop("o_name_cyr", "o_name_lat", "o_address_cyr", "o_address_lat")
+        )
     stations.write_parquet(config.STATIONS_PARQUET)
 
     # Refresh the pristine (edit-free) snapshots stage03c rebuilds from each recompute, so a
@@ -180,7 +326,9 @@ def main() -> int:
     pl.read_parquet(config.SEGMENTS_AMENDED_PARQUET).write_parquet(config.SEGMENTS_AMENDED_PRISTINE_PARQUET)
 
     n_ok = sum(a["applied"] for a in amend_audit)
+    n_repl = sum(1 for a in amend_audit if a["op"] == "replace_station")
     print(f"  amendment ops: {len(amend_audit)}  applied: {n_ok}  "
+          f"replace_station: {n_repl}  "
           f"unparsed: {sum(1 for a in amend_audit if a['op']=='other')}  "
           f"stations touched: {len(touched_stations)}")
     return 0

@@ -17,6 +17,7 @@ export interface ExportRow {
   name_lat: string;
   address_cyr: string;
   address_lat: string;
+  section_cyr?: string | null; // member-town label for city docs whose number restarts (Kostolac/Sevojno)
   geojson: string; // stored geometry, a GeoJSON MultiPolygon (occasionally Polygon)
 }
 
@@ -34,12 +35,16 @@ export function muniSlug(nameLat: string): string {
 
 /** Build the export properties for one station, honouring the active script. */
 function featureProps(r: ExportRow, opstina: string, script: Script) {
+  // A city document can bundle a member town (Kostolac/Sevojno) whose numbering restarts, so
+  // OPSTINA_number is not unique within the municipality; include the section to keep the
+  // pairing key unique. Ordinary municipalities (no section) keep the plain OPSTINA_number key.
+  const section = r.section_cyr ? tr(r.section_cyr, script) : null;
   return {
     BR_BM: r.number,
     OPSTINA: opstina,
     NAZIV_BM: script === "lat" ? r.name_lat : tr(r.name_cyr, script),
     ADRESA_BM: script === "lat" ? r.address_lat : tr(r.address_cyr, script),
-    Uparivanje: `${opstina}_${r.number}`,
+    Uparivanje: section ? `${opstina}_${section}_${r.number}` : `${opstina}_${r.number}`,
   };
 }
 

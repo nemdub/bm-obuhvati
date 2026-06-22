@@ -170,7 +170,7 @@ export async function getMunicipality(db: D1Database, id: string) {
 export async function listStations(db: D1Database, muniId: string) {
   const { results } = await db
     .prepare(
-      `SELECT ps.id, ps.number, ps.name_cyr, ps.name_lat, ps.address_cyr, ps.address_lat, ps.is_amendment,
+      `SELECT ps.id, ps.number, ps.section_cyr, ps.name_cyr, ps.name_lat, ps.address_cyr, ps.address_lat, ps.is_amendment,
               COUNT(DISTINCT cs.id) AS seg_count,
               COALESCE(SUM(CASE WHEN cs.needs_review = 1 AND COALESCE(o.reviewed, 0) = 0
                                 THEN 1 ELSE 0 END), 0) AS review_count,
@@ -184,7 +184,9 @@ export async function listStations(db: D1Database, muniId: string) {
          LEFT JOIN removed_stations rm ON rm.station_id = ps.id
         WHERE ps.municipality_id = ?
         GROUP BY ps.id
-        ORDER BY ps.number`
+        -- id is the running index → keeps a member town's sub-table (Kostolac/Sevojno)
+        -- contiguous after the city block, so section dividers render correctly.
+        ORDER BY ps.id`
     )
     .bind(muniId)
     .all<{ id: number; number: number } & Record<string, unknown>>();
@@ -208,7 +210,7 @@ export async function listStations(db: D1Database, muniId: string) {
     const synthId = ADDED_STATION_BASE + a.id;
     if (existing.has(synthId)) continue;
     rows.push({
-      id: synthId, number: a.number ?? 0, name_cyr: a.name_cyr, name_lat: a.name_cyr,
+      id: synthId, number: a.number ?? 0, section_cyr: null, name_cyr: a.name_cyr, name_lat: a.name_cyr,
       address_cyr: a.address_cyr ?? "", address_lat: a.address_cyr ?? "", is_amendment: 0,
       seg_count: 0, review_count: 0, reviewed: 0, dirty: a.dirty, removed: 0, is_added: 1,
     } as (typeof rows)[number]);

@@ -54,3 +54,58 @@ class TestBulletAnchor:
     def test_anchor_regex_captures_station_number(self):
         m = A.BULLET.search("Гласачко место број 7 ...")
         assert m and int(m.group(1)) == 7
+
+
+class TestReplacementParsing:
+    def _row(self, num, name, addr="addr", cov="cov"):
+        # rows_from_docx output shape: (section, number, name, address, coverage)
+        return (None, num, name, addr, cov)
+
+    def test_name_and_address_change(self):
+        # Palilula 98: OLD (first) -> NEW (last), name + address differ.
+        rows = [
+            self._row(98, 'ИСТУРЕНО ОДЕЉЕЊЕ ОШ', "СКЕЛА, ТОВИЛИШТЕ ББ", "Дирекција"),
+            self._row(98, 'ОШ "ОЛГА ПЕТРОВ"', "СКЕЛА, СКЕЛА БР. 9", "Дирекција"),
+        ]
+        ops = A.replacements_from_rows(rows)
+        assert len(ops) == 1
+        op = ops[0]
+        assert op["number"] == 98
+        assert op["old_name"] == "ИСТУРЕНО ОДЕЉЕЊЕ ОШ"
+        assert op["new_name"] == 'ОШ "ОЛГА ПЕТРОВ"'
+        assert op["new_address"] == "СКЕЛА, СКЕЛА БР. 9"
+
+    def test_coverage_only_change(self):
+        rows = [
+            self._row(84, "ОШ", "addr", "ВУЛОВИЋА 23В"),
+            self._row(84, "ОШ", "addr", "ВУЛОВИЋА 23Б"),
+        ]
+        ops = A.replacements_from_rows(rows)
+        assert len(ops) == 1 and ops[0]["new_coverage"] == "ВУЛОВИЋА 23Б"
+
+    def test_identical_reprint_skipped(self):
+        rows = [self._row(5, "ОШ", "a", "c"), self._row(5, "ОШ", "a", "c")]
+        assert A.replacements_from_rows(rows) == []
+
+    def test_single_record_not_a_replacement(self):
+        # Only a NEW row, no OLD pair → not emitted (additions / single-record forms).
+        assert A.replacements_from_rows([self._row(7, "ОШ", "a", "c")]) == []
+
+    def test_dual_script_doc_skipped(self):
+        # Tutin/Sjenica-style: every name cell restates itself in Latin → whole doc skipped.
+        rows = [
+            self._row(24, "Приватна кућа Privatna kuća", "Растеновиће Rastenoviće", "x"),
+            self._row(24, "Основна школа Osnovna škola", "Тузиње Tuzinje", "x"),
+        ]
+        assert A.replacements_from_rows(rows) == []
+
+
+class TestCellIsDualScript:
+    @pytest.mark.parametrize("cell,dual", [
+        ("Основна школа Osnovna škola", True),
+        ("Тузиње Tuzinje", True),
+        ("ОШ \"ОЛГА ПЕТРОВ\"", False),       # pure Cyrillic
+        ("МЗ МАКИШ", False),
+    ])
+    def test_cell_is_dual_script(self, cell, dual):
+        assert A._cell_is_dual_script(cell) is dual

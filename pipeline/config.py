@@ -148,6 +148,10 @@ DOC_MUNI_OVERRIDES: dict[str, str] = {
     # unstable. These two docs are Belgrade Palilula; Niš's Palilula comes from the Niš
     # sectioned doc. Without this, the Belgrade stations leak into Niš Palilula.
     "Palilula-glasacka-mesta.doc": "PALILULA (BEOGRAD)",
+    # Palilula.docx is NOT a second base doc — it's an `уместо/одређује се` amendment
+    # (renames stations 98/99), detected as an amendment by content (stage02) and applied in
+    # stage03b. It stays pinned here because the bare candidate "Palilula" is ambiguous
+    # (Belgrade vs Niš); the amendment must resolve against Belgrade Palilula's stations.
     "Palilula.docx": "PALILULA (BEOGRAD)",
 }
 
@@ -193,6 +197,21 @@ for _g in CITY_GROUPS:
 def group_rep(municipality_id: str) -> str:
     """Representative opstina id for matching scope (members -> rep, others -> self)."""
     return _MEMBER_TO_REP.get(municipality_id, municipality_id)
+
+
+_REP_MEMBERS: dict[str, list[str]] = {g["rep"]: list(g["members"]) for g in CITY_GROUPS}
+
+
+def is_group_rep(municipality_id: str) -> bool:
+    """True for the representative opstina of a scope-merge city group (Vranje, Požarevac,
+    Užice). Used by stage02 to detect a member town's sub-table (numbering restarts) inside
+    the rep's single document and label each station with its place."""
+    return municipality_id in _REP_MEMBERS
+
+
+def group_members(municipality_id: str) -> list[str]:
+    """Member opstina ids of a scope-merge group rep, in declaration order (empty if not a rep)."""
+    return _REP_MEMBERS.get(municipality_id, [])
 
 
 def parent_of(municipality_id: str) -> str | None:

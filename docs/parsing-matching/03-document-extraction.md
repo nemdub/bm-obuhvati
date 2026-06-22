@@ -14,11 +14,19 @@ macOS `textutil` to convert `.doc` → txt (linearized) and `.docx`/table `.doc`
 
 ## 3.1 File classification
 
-Each input file is classified by **filename**:
+Each input file is classified by **filename** (plus one content check):
 
-- **Amendment** (`AMENDMENT_RE`): contains `izmena|izmene|dopuna|dopune|ispravka|ispravke`.
-  → raw text stored for stage03b, not parsed as base stations.
-- **Military** (`MILITARY_RE`): contains `vojsk`. → skipped (no municipality).
+- **Special / non-municipal** (`MILITARY_RE` = `vojsk`, `SPECIAL_RE` = `inostran|zavod`):
+  national resolutions for voting by the military, abroad, or in institutions/prisons. They
+  carry no municipality table, so they are **skipped** (recorded `kind="special"`). Without
+  this they fuzzy-match a random muni by filename and inject phantom stations (10 country rows
+  under Senta, 29 prison rows under Jagodina).
+- **Amendment**: filename matches `AMENDMENT_RE` (`izmena|izmene|dopuna|dopune|ispravka|
+  ispravke`) **OR** the body carries `уместо/одређује се` override markers (`OVERRIDE_BODY_RE`
+  = `уместо:` / `мења се гласачко место` / `Стари назив гласачког места` / `Треба да стоји`).
+  The content check catches override docs whose filename lacks a keyword (e.g. `Palilula.docx`,
+  which otherwise parses as a *second base table* and duplicates stations). → raw text stored
+  for stage03b, not parsed as base stations.
 - **Base**: everything else.
 - **Lock files**: names starting with `~$` are skipped from the glob.
 
@@ -150,6 +158,23 @@ an opstina id; numbering restarts per section.
 
 Niš sections: `МЕДИЈАНА`=71331, `ПАЛИЛУЛА`=71323, `ПАНТЕЛЕЈ`=71307, `ЦРВЕНИ КРСТ`=71315,
 `НИШКА БАЊА`=71285.
+
+### Member-town sub-table labels (`section_labels_for_rows`)
+
+A few **scope-merge city docs** (`config.CITY_GROUPS` reps: Požarevac, Užice — *not* Vranje)
+bundle the member town's table as a **second numbering block**: the printed number restarts at
+1, so e.g. Požarevac's #1–11 and Kostolac's #1–11 share a municipality. Unlike sectioned docs
+these stations stay under the **city municipality** (matching scope unchanged); they are only
+*labelled* so the UI can separate them.
+
+**Rule:** for a doc whose muni is a group rep (`config.is_group_rep`), split the parsed rows at
+each **number reset** (`number <= previous`). Segment 0 → the rep city's `name_cyr`; segment *k*
+→ the *k*-th `config.group_members` name (Kostolac / Sevojno). The label is written to the
+`section_cyr` column. The number reset is the only signal robust across both parse paths — the
+`.doc` has a standalone `КОСТОЛАЦ` line, but the Užice `.docx` HTML folds `ГРАДСКА ОПШТИНА
+СЕВОЈНО` into its first station row. With no reset (one table) every label is `None`. The
+Worker renders a divider per section and includes it in the export `Uparivanje` key (the printed
+number alone is not unique within the muni).
 
 ## 3.6 `.doc` parse‑path: HTML columns over linearized text
 

@@ -131,8 +131,17 @@ export function stationsView(
 ) {
   const script = getScript(c);
   const t = makeT(script);
-  const rows = stations.map(
-    (s) => html`<tr class="${s.removed ? "removed-row" : ""}">
+  // Some city documents bundle a member town's table as a second numbering block (Požarevac →
+  // Kostolac, Užice → Sevojno), so the printed number repeats within the municipality. A
+  // section divider separates the blocks; the rows arrive grouped by block (ORDER BY id).
+  const rows: unknown[] = [];
+  let prevSection: string | null = null;
+  for (const s of stations) {
+    if (s.section_cyr && s.section_cyr !== prevSection) {
+      rows.push(html`<tr class="section-head"><td colspan="5">${tr(s.section_cyr, script)}</td></tr>`);
+    }
+    prevSection = s.section_cyr ?? null;
+    rows.push(html`<tr class="${s.removed ? "removed-row" : ""}">
       <td class="num">${s.number}</td>
       <td><a href="/s/${s.id}">${tr(s.name_cyr, script)}</a>
         ${s.is_added ? html`<span class="badge ok">${t("addedStation")}</span>` : ""}
@@ -142,8 +151,8 @@ export function stationsView(
       <td class="num">${s.seg_count}</td>
       <td class="num">${s.review_count > 0 ? html`<span class="badge warn">${s.review_count}</span>` : "0"}</td>
       <td class="num">${s.reviewed ? html`<span class="badge ok">✓</span>` : ""}${s.dirty ? html`<span class="badge dirty">⟳</span>` : ""}</td>
-    </tr>`
-  );
+    </tr>`);
+  }
   return layout(
     script,
     tr(muni.name_cyr, script),

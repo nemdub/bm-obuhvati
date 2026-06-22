@@ -35,6 +35,18 @@ from common.normalize import normalize_street
 
 AMENDMENT_RE = re.compile(r"\b(izmena|izmene|dopuna|dopune|ispravka|ispravke)\b", re.IGNORECASE)
 MILITARY_RE = re.compile(r"vojsk", re.IGNORECASE)
+# National "Решење о одређивању гласачких места" docs that are NOT a municipality table:
+# voting abroad (-inostranstvo) and in institutions/prisons (u zavodima). They fuzzy-match a
+# random muni by filename and inject phantom stations (10 country rows under Senta, 29 prison
+# rows under Jagodina). Skipped like the military doc.
+SPECIAL_RE = re.compile(r"inostran|zavod", re.IGNORECASE)
+# An amendment ("override") doc whose FILENAME lacks an izmena/dopuna/ispravka keyword
+# (e.g. Palilula.docx) — detected by its `уместо/одређује се` body markers so it routes to the
+# amendment pipeline instead of being parsed as a second base table (which duplicates stations).
+OVERRIDE_BODY_RE = re.compile(
+    r"уместо\s*:|мења\s+се\s+гласачко\s+место|стари\s+назив\s+гласачког\s+места|треба\s+да\s+стоји",
+    re.IGNORECASE,
+)
 HEADER_HINT = "НАЗИВ ГЛАСАЧКОГ МЕСТА"
 COUNT_RE = re.compile(r"одре[ђd]\w*\s+се\s+(\d+)\s+гласачк")
 INT_LINE_RE = re.compile(r"^(\d+)\s*\.*\s*$")  # station number with any trailing periods (e.g. "23", "23.", "23..")
@@ -241,6 +253,32 @@ def rows_from_doc(txt: str, sections: dict[str, str] | None = None
     return out
 
 
+def section_labels_for_rows(rows: list, muni_id: str, name_by_muni: dict[str, str]
+                            ) -> list[str | None]:
+    """Label each station with its place when a scope-merge city doc holds the member town's
+    table as a second block (printed numbering restarts at 1). The reset is the only signal
+    robust across both parse paths — the .doc has a standalone `КОСТОЛАЦ` line, but the Užice
+    .docx HTML folds `ГРАДСКА ОПШТИНА СЕВОЈНО` into its first station row. Segment 0 → the rep
+    city, segment k → the k-th group member (Kostolac / Sevojno). With no reset (one table,
+    e.g. Vranje) every label is None — no divider needed. Non-rep docs are never labelled."""
+    n = len(rows)
+    if not config.is_group_rep(muni_id):
+        return [None] * n
+    # rows are (section_muni, number, name, address, coverage)
+    seg_of: list[int] = []
+    seg = 0
+    prev: int | None = None
+    for _, num, *_ in rows:
+        if prev is not None and num <= prev:
+            seg += 1
+        prev = num
+        seg_of.append(seg)
+    if seg == 0:  # single table, no member sub-table → no labels
+        return [None] * n
+    labels = [name_by_muni.get(muni_id)] + [name_by_muni.get(m) for m in config.group_members(muni_id)]
+    return [labels[s] if s < len(labels) else None for s in seg_of]
+
+
 def rows_from_doc_triplets(txt: str) -> list[tuple[None, int, str, str, str]]:
     """Fallback for .doc tables with no number column: group the lines after the header
     into (name, address, coverage) triplets and number them sequentially. Only used when
@@ -287,6 +325,7 @@ def main() -> int:
         sys.exit("Run stage01 first (municipalities.parquet missing).")
     munis = pl.read_parquet(config.MUNICIPALITIES_PARQUET)
     match_muni = build_muni_matcher(munis)
+    name_by_muni = dict(zip(munis["id"], munis["name_cyr"]))
 
     files = sorted(
         p for p in config.DOCS_DIR.iterdir()
@@ -302,36 +341,49 @@ def main() -> int:
     muni_counter: dict[str, int] = {}
 
     for path in files:
-        is_amend = bool(AMENDMENT_RE.search(path.name))
         is_military = bool(MILITARY_RE.search(path.name))
+        is_special = bool(SPECIAL_RE.search(path.name))
         candidate = clean_filename_to_candidate(path.name)
         override = config.DOC_MUNI_OVERRIDES.get(path.name)
         if override:
             muni_id, muni_name, score = match_muni(override)
-        elif is_military:
-            muni_id, muni_name, score = None, "(military)", 0.0
+        elif is_military or is_special:
+            muni_id, muni_name, score = None, "(special)", 0.0
         else:
             muni_id, muni_name, score = match_muni(candidate)
 
+        # National non-municipal resolutions (military / abroad / institutions) carry no
+        # municipality table — skip them so they don't inject phantom stations into whatever
+        # muni their filename fuzzy-matched.
+        if is_military or is_special:
+            map_rows.append({
+                "file": path.name, "candidate": candidate, "kind": "special",
+                "municipality_id": None, "matched_name": muni_name, "score": round(score, 1),
+            })
+            continue
+
+        txt = textutil(path, "txt")
+        # An amendment ("override") doc: either the filename says so, or the body carries the
+        # `уместо/одређује се` replacement markers (Palilula.docx has no keyword in its name).
+        is_amend = bool(AMENDMENT_RE.search(path.name)) or bool(OVERRIDE_BODY_RE.search(txt))
+
         map_rows.append({
-            "file": path.name, "candidate": candidate, "kind":
-            "amendment" if is_amend else "military" if is_military else "base",
+            "file": path.name, "candidate": candidate,
+            "kind": "amendment" if is_amend else "base",
             "municipality_id": muni_id, "matched_name": muni_name, "score": round(score, 1),
         })
 
         if is_amend:
             amend_rows.append({
-                "source_file": path.name, "municipality_id": muni_id,
-                "raw_text": textutil(path, "txt"),
+                "source_file": path.name, "municipality_id": muni_id, "raw_text": txt,
             })
             continue
-        if is_military or muni_id is None:
-            continue  # special docs / unmapped handled separately
+        if muni_id is None:
+            continue  # unmapped — handled separately
 
         # Sectioned city docs (e.g. Niš) map "ГРАДСКА ОПШТИНА <name>" sections to opstine.
         section_map = {normalize_street(k): v for k, v in config.SECTIONED_DOCS.get(path.name, {}).items()}
 
-        txt = textutil(path, "txt")
         if path.suffix.lower() == ".docx":
             rows = rows_from_docx(textutil(path, "html"))
         else:
@@ -359,7 +411,10 @@ def main() -> int:
         if declared is not None and declared != len(rows):
             print(f"  WARN {path.name}: declared {declared} stations, parsed {len(rows)}")
 
-        for section_muni, num, name, address, coverage in rows:
+        # Place label for a scope-merge city doc that holds the member town's table as a
+        # second numbering block (Požarevac→Kostolac, Užice→Sevojno); None otherwise.
+        section_cyr_rows = section_labels_for_rows(rows, muni_id, name_by_muni)
+        for (section_muni, num, name, address, coverage), section_cyr in zip(rows, section_cyr_rows):
             station_muni = section_muni or muni_id  # section's opstina, else the doc's
             muni_counter[station_muni] = muni_counter.get(station_muni, 0) + 1
             station_rows.append({
@@ -375,9 +430,10 @@ def main() -> int:
                 "raw_coverage_text": coverage,
                 "source_file": path.name,
                 "is_amendment": 0,
+                "section_cyr": section_cyr,
             })
 
-    stations = pl.DataFrame(station_rows) if station_rows else pl.DataFrame()
+    stations = pl.DataFrame(station_rows, infer_schema_length=None) if station_rows else pl.DataFrame()
     stations.write_parquet(config.STATIONS_PARQUET)
     pl.DataFrame(amend_rows).write_parquet(config.AMENDMENTS_RAW_PARQUET)
     pl.DataFrame(map_rows).write_csv(config.DOC_MUNI_MAP)

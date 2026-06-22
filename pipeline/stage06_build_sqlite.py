@@ -42,6 +42,7 @@ TABLES: dict[str, tuple[Path, list[str]]] = {
     "polling_stations": (config.STATIONS_PARQUET, [
         "id", "municipality_id", "number", "name_cyr", "name_lat",
         "address_cyr", "address_lat", "raw_coverage_text", "source_file", "is_amendment",
+        "section_cyr",
     ]),
     "coverage_segments": (config.SEGMENTS_PARQUET, [
         "id", "station_id", "settlement_raw", "street_raw", "street_id", "kind",
@@ -366,7 +367,7 @@ def write_muni_meta(df: pl.DataFrame, out: Path) -> int:
 # Columns each per-municipality polygon blob carries — mirrors the old D1
 # `polygons ⋈ polling_stations` row exactly, so the Worker serves them unchanged.
 R2_BLOB_COLS = [
-    "station_id", "number", "name_cyr", "name_lat", "address_cyr", "address_lat",
+    "station_id", "number", "section_cyr", "name_cyr", "name_lat", "address_cyr", "address_lat",
     "geojson", "area_m2", "point_count", "computed_at", "osm",
 ]
 
@@ -381,7 +382,7 @@ def write_r2_blobs(polys: pl.DataFrame, stations: pl.DataFrame, out_dir: Path) -
     `geojson` stays a STRING (the Worker JSON.parses it per feature), matching the prior
     D1 contract. Returns (muni_count, polygon_count)."""
     meta = stations.select(
-        ["id", "municipality_id", "number", "name_cyr", "name_lat", "address_cyr", "address_lat"]
+        ["id", "municipality_id", "number", "section_cyr", "name_cyr", "name_lat", "address_cyr", "address_lat"]
     )
     df = polys.join(meta, left_on="station_id", right_on="id", how="inner")
     m_dir = out_dir / "polygons" / "m"

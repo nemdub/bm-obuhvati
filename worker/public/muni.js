@@ -50,10 +50,22 @@
     let sortCol = 0;
     let sortDir = 1; // 1 = ascending
     const cellNum = (row, col) => parseFloat(row.cells[col].textContent) || 0;
+    const isHead = (r) => r.classList.contains("section-head");
     const applySort = () => {
-      [...tbody.rows]
-        .sort((a, b) => (cellNum(a, sortCol) - cellNum(b, sortCol)) * sortDir)
-        .forEach((r) => tbody.appendChild(r));
+      // Sort WITHIN each section block (a member town's sub-table — Kostolac/Sevojno — keeps
+      // its own numbering), leaving the divider rows in their block order. Municipalities
+      // without sections form a single group, so this is the plain sort.
+      const groups = [];
+      let cur = null;
+      for (const r of [...tbody.rows]) {
+        if (isHead(r)) { cur = { head: r, items: [] }; groups.push(cur); }
+        else { if (!cur) { cur = { head: null, items: [] }; groups.push(cur); } cur.items.push(r); }
+      }
+      for (const g of groups) {
+        g.items.sort((a, b) => (cellNum(a, sortCol) - cellNum(b, sortCol)) * sortDir);
+        if (g.head) tbody.appendChild(g.head);
+        g.items.forEach((r) => tbody.appendChild(r));
+      }
       table.querySelectorAll("th.sortable .arrow").forEach((a) => (a.textContent = ""));
       const arrow = table.querySelector(`th.sortable[data-col="${sortCol}"] .arrow`);
       if (arrow) arrow.textContent = sortDir > 0 ? "▲" : "▼";

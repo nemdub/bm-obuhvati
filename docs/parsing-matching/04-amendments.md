@@ -32,6 +32,29 @@ Three typed ops, tried in order. `Q = [„“"']` matches Serbian and ASCII quot
 
 A bullet matching none → audit op `other` (unparsed; counted in the run summary).
 
+## 4.2b Whole-station replacements (`уместо / одређује се`)
+
+The most common amendment format (27 docs) reprints a station's **entire row** twice — an OLD
+table (`уместо:` / `Стари назив` / `… N уместо:`) then a NEW table (`одређује се:` /
+`Треба да стоји:` / `Нови назив`) — keyed by the printed number. `parse_replacement_doc` reads
+the doc's Word table as **HTML** (`rows_from_docx`) for clean `<td>` columns (robust to names
+that wrap across lines, which linearized txt mis-splits). In document order the **first** data
+row for a number is the OLD record, the **second** is the NEW one (`replacements_from_rows`).
+
+An op `replace_station {number, old_*, new_*}` is emitted only when a field actually changed, so
+ordinary non-replacement amendment tables are ignored. **Dual-script docs** (Tutin / Sjenica /
+Prijepolje — each cell restates itself in Latin; `_cell_is_dual_script`) are skipped to avoid
+building doubled text (base coverage stays loaded). Apply:
+
+- **name / address** changed → patch `name_cyr/name_lat/address_cyr/address_lat` on the station.
+- **coverage** changed → re-parse the new text (`stage03.segments_for_station` +
+  `build_muni_street_index`) and **replace** the station's base segments (`source='amendment'`).
+- `is_amendment=1`; audited as `op="replace_station"`.
+
+Not yet handled (fall back to base-loaded, no regression): **single-record** forms that give only
+the corrected row (need new-vs-base diffing + `Нема промене` sentinel + dual-script de-dup) and
+**prose-inline** fixes (`уместо назива … треба да стоји назив:`, `замењују се речима и бројевима:`).
+
 ## 4.3 Street matching within a station (`street_matches`)
 
 **Rule:** an amendment street matches a base segment's street if, after `normalize_street`,
@@ -68,6 +91,7 @@ base table.
 
 ## 4.6 Known limitation
 
-Only Subotica‑style phrasing parses today. ~45 amendment docs use different wording and
-currently yield `other` ops (the base coverage is still loaded; only the surgical edit is
-skipped). New phrasings are a natural place to add regexes + tests.
+Two amendment families parse today: Subotica‑style **coverage bullets** (§4.2) and
+`уместо/одређује се` **whole-station replacements** (§4.2b, 6 docs / 16 stations with the clean
+two-table structure). The remaining docs use single-record or prose-inline forms (§4.2b) and
+still fall back to base-loaded coverage. New phrasings are a natural place to add parsers + tests.
