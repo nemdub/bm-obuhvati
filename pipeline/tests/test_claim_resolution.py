@@ -74,6 +74,17 @@ class TestConflicts:
         assert assigned == {}
         assert conflicts == {10: {200}, 20: {100}}
 
+    def test_two_settlement_claims_same_settlement_conflict(self):
+        # Two stations both claiming the same settlement emit sett_whole claims on every shared
+        # street; they tie (spec -1) on its houses -> conflict. This is the ONLY thing that
+        # re-flags a settlement claim (the `settlement_claim` reason is otherwise informational
+        # — see docs/parsing-matching/07 §7.4).
+        rows = [(1, 7, "")]
+        claims = [_whole(10, 100, kind="sett_whole"), _whole(20, 200, kind="sett_whole")]
+        assigned, conflicts, _ = S4.resolve_street_claims(claims, rows)
+        assert assigned == {}
+        assert conflicts == {10: {200}, 20: {100}}
+
     def test_disjoint_intervals_no_conflict(self):
         rows = [(1, 3, ""), (2, 12, "")]
         claims = [_interval(10, 100, 1, 10, "all"), _interval(20, 200, 11, 20, "all")]

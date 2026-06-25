@@ -311,7 +311,9 @@ street anywhere in that muni — or scope the fix to a single station via the UI
 leading **`НАСЕЉЕ `** or **`НАСЕЉЕНО МЕСТО `** (the latter is how every Vladimirci station is
 written: `насељено место Белотић`). If the de‑prefixed `primary` matches a settlement name in
 the muni, claim **every street** of that settlement (first id anchor, rest in `ambiguous_ids`).
-Method `settlement`, score 85, reason `settlement_claim:НАЗИВ` (flagged).
+Method `settlement`, score 85, reason `settlement_claim:НАЗИВ`. The reason is **informational
+only** — an exact whole‑settlement match is not reviewed unless another station claims the same
+settlement (a real conflict; see [07](07-review-flags.md) §7.4).
 
 > The marker must be the **nominative** whole‑settlement form. `део насељеног места <X>`
 > ("**part of** settlement X", genitive) is deliberately **not** stripped: it claims only a

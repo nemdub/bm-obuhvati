@@ -1317,12 +1317,18 @@ def main() -> int:
         if r["id"] in parity_unconfirmed:
             reasons.append("parity_unconfirmed")
 
-        # parity_unconfirmed is informational only: the inferred odd/even side has proven
-        # correct in the vast majority of cases, so it no longer triggers review on its own.
-        # It stays in review_reason (shown as context when the segment is flagged for some
-        # OTHER reason, and the per-range parity dropdown remains available either way), but
-        # a segment flagged ONLY for parity is treated as resolved.
-        flagging = [x for x in reasons if x != "parity_unconfirmed"]
+        # Informational-only reasons stay in review_reason (so the UI shows context / titles
+        # the card) but never trigger review on their own — a segment flagged ONLY for these
+        # is treated as resolved:
+        #  - parity_unconfirmed: the inferred odd/even side has proven correct in the vast
+        #    majority of cases; the per-range parity dropdown remains available either way.
+        #  - settlement_claim: an exact whole-settlement match is trusted. We surface it for
+        #    review ONLY when another station claims the same settlement — which is a real
+        #    conflict that already lands in conflict_map and adds a `conflict:` reason (two
+        #    same-settlement claims both emit sett_whole and tie on every shared house). The
+        #    marker is kept so the UI still titles the card by the settlement name.
+        INFORMATIONAL = {"parity_unconfirmed", "settlement_claim"}
+        flagging = [x for x in reasons if x.split(":", 1)[0] not in INFORMATIONAL]
 
         out_segs.append({
             "id": r["id"], "station_id": r["station_id"], "settlement_raw": r["settlement_raw"],

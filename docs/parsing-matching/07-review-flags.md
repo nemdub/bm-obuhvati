@@ -6,8 +6,8 @@ Code: `pipeline/stage04_match_addresses.py` (finalize loop in `main`); localized
 stage04 records **why** each segment is flagged in `coverage_segments.review_reason` as
 comma‑separated codes. `needs_review` is set when any *flagging* reason is present.
 
-> Test target: the reason‑assembly logic and the `flagging = reasons - {parity_unconfirmed}`
-> rule; per‑method confidence values.
+> Test target: the reason‑assembly logic and the `flagging = reasons - {parity_unconfirmed,
+> settlement_claim}` rule; per‑method confidence values.
 
 ## 7.1 Confidence by method
 
@@ -17,7 +17,7 @@ comma‑separated codes. `needs_review` is set when any *flagging* reason is pre
 | exact (structured) | 0.95 | no |
 | `manual` / `manual_settlement` | 0.9 | no |
 | `manual_none` | 0.9 | no (resolved, no street) |
-| `settlement` (village) | 0.8 | yes (`settlement_claim`) |
+| `settlement` (village) | 0.8 | no¹ (`settlement_claim` is informational) |
 | `base_parts` | 0.7 | yes |
 | `locality` | 0.7 | yes |
 | `alias` | 0.6 | yes |
@@ -27,6 +27,9 @@ comma‑separated codes. `needs_review` is set when any *flagging* reason is pre
 | `muni_fallback` | 0.4 | yes |
 | `ambiguous` | 0.2 | yes |
 | unresolved (`street_id is None`) | 0.2 | yes (`street_unresolved`) |
+
+¹ A whole‑settlement match is trusted on its own. It is only reviewed when **another station
+claims the same settlement** — a real conflict that adds a `conflict:` reason (see §7.4).
 
 ## 7.2 Reason codes
 
@@ -42,7 +45,7 @@ Assembled per segment (`reasons` list):
 | `abbrev` | initial/title‑abbreviated name expanded to a settlement street (`М.Пупина` → `МИХАЈЛА ПУПИНА` — see [05](05-street-resolution.md) §5.10a) |
 | `base_parts` | plain base name expanded to numbered part streets |
 | `locality` | single-word coverage expanded to a register sub-locality/hamlet cluster (заселак prefix — see [05](05-street-resolution.md) §5.15) |
-| `settlement_claim:НАЗИВ` | whole‑settlement (village) claim |
+| `settlement_claim:НАЗИВ` | whole‑settlement (village) claim — **informational only** (see §7.4) |
 | `muni_fallback` | exact match found only municipality‑wide |
 | `unknown_tokens` | parse left unclassified number‑side tokens (blocks etc.) |
 | `named_block` | segment kind is `named_block` |
@@ -65,14 +68,23 @@ Some codes carry a `:`‑separated parameter that the Worker splits off for the
 ## 7.4 `needs_review` computation
 
 ```python
-flagging = [x for x in reasons if x != "parity_unconfirmed"]
+INFORMATIONAL = {"parity_unconfirmed", "settlement_claim"}
+flagging = [x for x in reasons if x.split(":", 1)[0] not in INFORMATIONAL]
 needs_review = int(bool(flagging))
 ```
 
-**Rule:** `parity_unconfirmed` is **informational only** — a segment flagged *only* for
-parity is treated as resolved (`needs_review = 0`), but the code stays in `review_reason` so
-it shows as context when the segment is flagged for another reason. All other codes set
-`needs_review = 1`.
+**Rule:** `parity_unconfirmed` and `settlement_claim` are **informational only** — a segment
+flagged *only* for one of these is treated as resolved (`needs_review = 0`), but the code
+stays in `review_reason` so it shows as context (and lets the Worker title a settlement card
+by its area name). All other codes set `needs_review = 1`.
+
+- `parity_unconfirmed` — the inferred odd/even side has proven correct in the vast majority
+  of cases.
+- `settlement_claim:НАЗИВ` — an exact whole‑settlement match is trusted. It is surfaced for
+  review **only when another station claims the same settlement**: both stations emit
+  `sett_whole` claims, tie on every shared house, and so land in `conflict_map` → the segment
+  also carries a `conflict:` reason, which *does* flag it. A settlement claimed by exactly one
+  station is therefore not reviewed.
 
 ## 7.5 Name discrepancy appended by the Worker
 
