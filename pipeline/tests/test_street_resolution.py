@@ -436,3 +436,41 @@ class TestInitialAbbrev:
     def test_full_name_not_via_abbrev(self):
         # A fully spelled street (no initial) resolves exact, not abbrev.
         assert S4.resolve_street("Стевана Крајца", MUNI, "S1", self._idx())[:2] == ("st4", "exact")
+
+
+class TestSettlementPrefix:
+    """Jagodina convention: every street is prefixed with its settlement name and a dash,
+    so "Рибаре – Кнегиње Милице" normalizes to "РИБАРЕ КНЕГИЊЕ МИЛИЦЕ". Strip the leading
+    settlement name and resolve the remainder scoped to THAT settlement."""
+
+    def _idx(self):
+        return make_index(
+            {
+                "RIB": {"st1": "Кнегиње Милице", "st2": "Цара Душана"},
+                "LOV": {"st3": "Проте Матеје"},
+                "DV": {"st4": "Главна"},          # "Добра Вода" — multi-word settlement
+            },
+            {"RIB": "Рибаре", "LOV": "Ловци", "DV": "Добра Вода"},
+        )
+
+    def test_prefix_rescopes_to_named_settlement(self):
+        # Station home is Ловци, but the clause names a Рибаре street — exact, unflagged.
+        assert S4.resolve_street("Рибаре – Кнегиње Милице", MUNI, "LOV", self._idx())[:2] == (
+            "st1", "exact")
+
+    def test_prefix_glued_with_hyphen(self):
+        # Hyphen with no spaces ("Ловци-Проте Матеје") strips the same way after normalize.
+        assert S4.resolve_street("Ловци-Проте Матеје", MUNI, "LOV", self._idx())[:2] == (
+            "st3", "exact")
+
+    def test_multiword_settlement_prefix(self):
+        assert S4.resolve_street("Добра Вода - Главна", MUNI, "LOV", self._idx())[:2] == (
+            "st4", "exact")
+
+    def test_bare_settlement_is_still_a_claim_not_a_prefix(self):
+        # The bare settlement name must not be stripped to nothing — it stays a settlement claim.
+        assert S4.resolve_street("Рибаре", MUNI, "LOV", self._idx())[1] == "settlement"
+
+    def test_no_false_match_for_unknown_street(self):
+        assert S4.resolve_street("Рибаре – Непостојећа", MUNI, "LOV", self._idx())[:2] == (
+            None, "none")

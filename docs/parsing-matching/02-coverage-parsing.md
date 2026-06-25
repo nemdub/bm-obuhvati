@@ -418,11 +418,14 @@ dialect detection):
 |-------|-----|---------|
 | `_LIST_PREAMBLE_RE` | drop a prose list‑introducer ending `у улици:` / `у улицама:` | `…у МЗ Беочин град у улицама: 1.маја, …` → `1.маја, …` |
 | `_OBUHVATA_PREAMBLE_RE` | drop a Смед. Паланка `обухвата … улица[:]` preamble | `обухвата подручје улица: 7. јула, …` → `7. јула, …` |
-| `_unwrap_number_parens` | unwrap a parenthesised number/side directive | `Омладинска (сви непарни бројеви)` → `Омладинска сви непарни бројеви` |
+| `_SETT_SCOPE_RE` | drop an in‑text `у насељу <Name>:` settlement‑scope marker | `…Заселак Дубоки поток, у насељу Соколац: Брдарска…` → `…Заселак Дубоки поток, Брдарска…` (see 2.16) |
+| `_unwrap_number_parens` | unwrap a parenthesised number/side directive (cleaning Ljubovija clarifications) | `Омладинска (сви непарни бројеви)` → `Омладинска сви непарни бројеви` (see 2.16) |
 | `_DEO_GLUE` | split `део` glued to a number | `део13` → `део 13` (see 2.7) |
 | `_NUM_DO_DASH` | split a dash standing in for `од … до` | `98-до краја` → `98 до краја` (see 2.12) |
 | `_DASH_SPACE` | collapse spaces around a range dash, **digits only** | `2- 100`, `2 - 100` → `2-100` |
 | `_ORDINAL_GLUE` | split an ordinal glued to the next word | `7.јула` → `7. јула` |
+| `_NAME_NUM_GLUE` | split a house number glued to the end of a name (letter‑run **≥3**) | `Косовска8` → `Косовска 8` |
+| `_CAMEL_GLUE` | split two name words glued at a lower→upper boundary | `КраљаАлександра` → `Краља Александра` |
 | `_HOUSE_NUM_DOT` | drop a house number's trailing dot in a number context | `52. и 54.` → `52 и 54` |
 
 - **`_LIST_PREAMBLE_RE`** strips up to and including a `…у улиц(и|ама):` marker. Some docs
@@ -439,6 +442,26 @@ dialect detection):
   `-`, `100`).
 - **`_ORDINAL_GLUE`** keeps a glued ordinal in the street name: `7.јула 1-10` → street
   `7. јула`, interval `[1, 10, 'all']` (otherwise `7` would look like a house number).
+- **`_NAME_NUM_GLUE`** splits a house number written with **no space** after the street name
+  (`Косовска8`, `Школска15`, `Тихомира Матића12`, `Спортска13` — common in Jagodina, which also
+  prefixes the settlement, see [05](05-street-resolution.md) §5.17). No Serbian street name ends
+  in a glued number — register names that carry a number always keep a **space** (`НОВА 13`,
+  `ВОЈНИ ПУТ 1`, `БЛОК 112`) — so a digit run is split off a letter run of length **≥3**. The
+  **≥3 guard** preserves housing‑estate **block tags**, which are 1–2 letters glued to a digit
+  (`Е1`, `АБ1`, `Т8`, see 2.5) and must stay whole on the number side. The split is
+  **self‑correcting** via `is_street` (2.14): a genuinely numbered name re‑attaches the number
+  (`Нова13` → `Нова 13` → register `НОВА 13`), an ordinary name keeps it as a house number
+  (`Косовска8` → street `Косовска`, house `8`). Direction matters — only **letter→digit** is
+  split; a house suffix (**digit→letter**, `8А`) is untouched. Nationwide 38 segments carry a
+  glued number (28 in Jagodina); 26 were unresolved before this.
+- **`_CAMEL_GLUE`** splits two **name words** glued with no space (`КраљаАлександра` → `Краља
+  Александра`, `ПутКнезаМихајла` → `Пут Кнеза Михајла`). A capital letter inside a word is a
+  reliable word boundary — Serbian Title‑Case names never carry a capital mid‑word — so a
+  lowercase letter is split from a following uppercase letter. The uppercase must itself **begin
+  a Title‑Case word** (be followed by a lowercase letter), so an all‑caps tail like `СолунСКА`
+  (a mis‑cased `СОЛУНСКА`, one word) is **not** torn into `Солун СКА`. Composes with
+  `_NAME_NUM_GLUE` (`КраљаАлександра72` → `Краља Александра` + house `72`) and is idempotent on
+  correctly spaced text (no lower→upper adjacency). 17 segments nationwide.
 - **`_HOUSE_NUM_DOT`** strips the trailing dot from a house number written `52.`/`54.` so it is
   no longer mistaken for a list ordinal (`is_house_token` rejects `^\d+\.$`). Fires **only** in a
   number-side context — when the dot is followed by a list separator (`,`/`;`/`и`), another
@@ -460,4 +483,54 @@ dialect detection):
   stage04's `(…)` stripper (needing a closing paren) cannot remove. Only directive parentheticals
   are unwrapped — an **alt‑name** (`(Бориса Кидрича)`, `(493. нова)`, no parity/`од`/`до краја`/
   range/`бр` marker) is left intact for stage04's alt‑name matching ([05](05-street-resolution.md)).
+
+## 2.16 Ljubovija number directives — `(и то: …)` parenthetical, `бројеви кућа`, settlement‑assignment
+
+Ljubovija (muni 70777) writes its per‑street number directives in a verbose style that broke the
+compact parser in several ways at once. A representative cell (station 5):
+
+```
+Ужички пут (и то: непарни бројеви кућа од 1 – 105, од којих бројеви од 1 – 59 припадају
+насељу Љубовија а бројеви од 61 – 105 припадају насељу Дубоко, парни бројеви кућа од 2 – 80,
+од којих бројеви од 2 – 54 …), Милунке Савић, …
+```
+
+Before the fix this produced a **phantom `то:` street** carrying all the ranges (so `Ужички пут`
+was left a bare whole‑street), plus ~20 `unknown_tokens` from the settlement clarification, and on
+station 14 a chained `, а бројеви … припадају насељу` spilled into a **second phantom `а` street**.
+Station 12 is the reported case — a comma *before* the paren (`Крупањски пут, (и то: …)`) stranded
+the ranges entirely off `Крупањски пут`.
+
+Four cooperating fixes, all register‑agnostic and gated so non‑Ljubovija docs are untouched:
+
+- **Directive‑paren cleaning** (`_clean_directive_parens`, inside `_unwrap_number_parens`). When a
+  directive parenthetical also carries clarification noise (gate `_CLEAN_TRIGGER_RE` =
+  `припадају | насељ | кој | кућа | и то`), its inner comma‑clauses are filtered **before** the
+  parens are dropped: the `и то(:)` "namely" marker and the `бројеви кућа` house‑filler are
+  removed, then each comma‑clause is **kept** unless it is a settlement clarification —
+  `од којих …`, a bare `насеље X` label, or a `… од N‑M припадају насељу X` continuation (leading
+  `и`/`а` connectors stripped first). A real parity clause that carries an **inline** tail
+  (`непарни … 1 – 7 који припадају насељу Грачаница`) is kept but **truncated** at the clarification
+  keyword. The result is just the real number directives — parity ranges **and** plain singles
+  (`и то кућа број 41` → `број 41`). Ordinary directive parens (plain ranges, `сви непарни`,
+  `до краја`) don't match the gate and pass through **exactly** as before (2.15).
+- **`кућа` / `само` fillers** in `_add_numbers` and the `само`‑before‑parity guard in the street‑name
+  scan, so `Моше Пијаде само парни бројеви кућа` → street `Моше Пијаде`, whole **even** side, and any
+  `кућа` that survives cleaning (e.g. the comma‑separated paren of station 12) is dropped on the
+  number side rather than flagged.
+- **Trailing‑`)` strip** in `parse_number_token` for the source typo on station 24
+  (`Шапарска (… од 53 – 95), парни … од 80 – 116)` → bound token `80-116)` → `80-116`). Only `)`,
+  never `(` — a leading `(` marks an alt‑name (`(4. јула)`) whose number must stay non‑numeric.
+- **`_SETT_SCOPE_RE`** strips an in‑text `у насељу <Name>:` settlement‑scope marker (stations 10/15
+  group their streets by settlement). The comma separator is **preserved** (`\1 `) so the marker
+  doesn't glue the preceding street onto the following one. Only the colon‑terminated form is the
+  scope marker; the dative `припадају насељу X` clarification (no colon) is removed by the paren
+  cleaner, and `(насеље X)` street labels keep their parens.
+
+After the fix every Ljubovija street carries its own correct odd/even intervals — e.g. station 12
+`Крупањски пут` → `[[155, 237, 'odd'], [152, 258, 'even']]`, station 33 `Зобнашка` → single `41` —
+with **no** phantom streets and **no** clarification `unknown_tokens`. Impact (parser A/B over all
+8 150 stations, this change only): **0** streets added/removed and **0** street‑name/interval
+changes outside Ljubovija; the only non‑Ljubovija deltas are cosmetic `unknown_token` cleanup and a
+handful of trailing‑`)` typos that now expose a real house number.
 

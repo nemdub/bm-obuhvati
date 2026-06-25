@@ -406,6 +406,41 @@ flagged for review.
 > and `data/naselje.csv`. A settlement-polygon source cannot cover it; the locality claim is
 > the right mechanism. See 5.12 for *real* whole-settlement (village) claims.
 
+## 5.17 Settlement-name prefix (`_settlement_prefix_candidates`) — the Jagodina convention
+
+**Rule:** some municipalities prefix **every** street with its **settlement name** and a dash:
+Jagodina's doc writes „Рибаре – Кнегиње Милице", „Ловци-Проте Матеје", „Глоговац-Моравска".
+After `normalize_street` drops the dash this becomes `РИБАРЕ КНЕГИЊЕ МИЛИЦЕ` — but the register
+files the street as plain `КНЕГИЊЕ МИЛИЦЕ` under the РИБАРЕ naselje, so nothing matches and the
+prefixed form noisily fuzz-matched the bare street (flagged `fuzzy`) or missed outright →
+**review for basically every street**.
+
+`_settlement_prefix_candidates(primary, muni, settlements_by_muni)` returns `(remainder,
+settlement_id)` for each municipality settlement whose **normalized name is a leading
+token-prefix** of `primary` (longest first, so multi-word villages like „Добра Вода" win over a
+shorter coincidental match). `resolve_street` then **recurses once** on the remainder, scoped to
+**that** settlement, and keeps the result only if it resolves (`allow_prefix_strip=False` on the
+inner call blocks infinite recursion).
+
+### Why this placement / scope
+
+- Tried **after** the deterministic in-scope rungs (exact/declension/parts/locality) but
+  **before `_fuzzy`** — so a de-prefixed name matches **exactly** (unflagged) instead of the
+  prefixed form fuzz-matching the bare street. The recursion runs the *full* ladder on the
+  remainder, so a genuine typo inside the name still fuzzes (flagged) within the right village.
+- Scopes to the **prefix** settlement, **not** the station's home settlement: rural stations
+  span many villages (Ловци, Вољавче, Рибаре, Глоговац…) and each clause names its own — the
+  inline prefix is a stronger signal than the address-derived home. This is what lets a
+  multi-village station resolve every clause in its correct naselje.
+- **Register-confirmed** (kept only if the remainder is a real street in the named settlement)
+  and the bare settlement name is **excluded** (`primary != snorm`) so whole-settlement claims
+  (5.12) still take that path.
+
+Method/score **bubble up from the recursion** — an exact remainder reports `exact` (unflagged),
+a typo reports `fuzzy`. Global (every muni), like `_part_streets`/`_locality_streets`; the
+register guard keeps it inert where the convention isn't used. Tested in
+`TestSettlementPrefix`.
+
 ## 5.14 (cont.) Proximity worked example
 
 > Worked example — `Рзавска` (Arilje area): the doc street isn't in the station's home

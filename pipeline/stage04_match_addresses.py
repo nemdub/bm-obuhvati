@@ -531,7 +531,27 @@ def _weak_substring_fuzzy(rec, street_meta) -> bool:
     return len(toks) > 1 and primary in toks and toks[0] != primary
 
 
-def resolve_street(street_raw, muni, settlement_id, idx, settlement_inferred=False
+def _settlement_prefix_candidates(primary: str, muni: str, settlements_by_muni
+                                  ) -> list[tuple[str, str]]:
+    """Settlement-name prefixes (Jagodina convention). Some municipalities prefix every street
+    with its settlement name and a dash — doc "Рибаре – Кнегиње Милице" normalizes to
+    "РИБАРЕ КНЕГИЊЕ МИЛИЦЕ" while the register files the street as "КНЕГИЊЕ МИЛИЦЕ" under
+    settlement Рибаре. If `primary` begins with the normalized name of a municipality
+    settlement followed by at least one more word, yield (remainder, settlement_id) — longest
+    settlement name first (multi-word villages like "ДОБРА ВОДА"). The bare settlement name on
+    its own is NOT a prefix (that's a whole-settlement claim, resolved elsewhere)."""
+    out: list[tuple[str, str, int]] = []
+    for sid, snorm in settlements_by_muni.get(muni, []):
+        if snorm and primary != snorm and primary.startswith(snorm + " "):
+            rest = primary[len(snorm) + 1:].strip()
+            if rest:
+                out.append((rest, sid, len(snorm)))
+    out.sort(key=lambda t: -t[2])
+    return [(r, s) for r, s, _ in out]
+
+
+def resolve_street(street_raw, muni, settlement_id, idx, settlement_inferred=False,
+                   allow_prefix_strip=True
                    ) -> tuple[str | None, str, float, list[str]]:
     """Resolve a street name to a register street id, scoped to the station's settlement
     first, then municipality. Returns (street_id, method, score, ambiguous_ids).
@@ -605,6 +625,20 @@ def resolve_street(street_raw, muni, settlement_id, idx, settlement_inferred=Fal
     loc = _locality_streets(primary, sett_scope, idx[0])
     if len(loc) >= 2:
         return loc[0], "locality", 80.0, loc[1:]
+    # Settlement-name prefix (Jagodina convention): the document glues each street's settlement
+    # onto its name with a dash, so "РИБАРЕ КНЕГИЊЕ МИЛИЦЕ" never matches register "КНЕГИЊЕ
+    # МИЛИЦЕ". When the name starts with a muni settlement, strip it and resolve the remainder
+    # scoped to THAT settlement (which may differ from the station's home settlement on a
+    # multi-village station). Register-confirmed: kept only if the remainder actually resolves,
+    # and tried BEFORE fuzzy so the de-prefixed name matches exactly instead of the prefixed
+    # form noisily fuzzing the bare street. Recurses once (allow_prefix_strip=False).
+    if allow_prefix_strip:
+        for rest, pref_sid in _settlement_prefix_candidates(primary, muni, idx[4]):
+            sid2, m2, sc2, amb2 = resolve_street(
+                rest, muni, pref_sid, idx, settlement_inferred=False,
+                allow_prefix_strip=False)
+            if sid2 is not None:
+                return sid2, m2, sc2, amb2
     # Fuzzy ONLY on the primary key, ONLY within the station's own settlement (catches
     # typos in the right place). Never fuzzy municipality-wide (invents matches for
     # nonexistent streets) and never fuzzy the parenthetical alternate.

@@ -178,6 +178,66 @@ class TestDeo:
         assert s.street_raw == "Угриновачки пут 1 део" and s.singles == [[13, ""]]
 
 
+class TestGluedHouseNumber:
+    """A house number glued to a street name with no space ("Косовска8") is split off by
+    _NAME_NUM_GLUE so the number leaves the street name (the Jagodina convention)."""
+
+    def test_glued_number_split_off(self):
+        s = parse_coverage("Косовска8")[0]
+        assert s.street_raw == "Косовска" and s.singles == [[8, ""]]
+
+    def test_multiword_name_glued_number(self):
+        s = parse_coverage("Тихомира Матића12")[0]
+        assert s.street_raw == "Тихомира Матића" and s.singles == [[12, ""]]
+
+    def test_two_digit_glued_number(self):
+        s = parse_coverage("Школска15")[0]
+        assert s.street_raw == "Школска" and s.singles == [[15, ""]]
+
+    def test_numbered_name_reattaches_via_is_street(self):
+        # A genuinely numbered street ("Нова 13") keeps the number in the NAME because the
+        # register has it (always spaced); the split is undone by parse_compact's is_street.
+        reg = {normalize_street("Нова 13")}
+        s = parse_coverage("Нова13", is_street=reg.__contains__)[0]
+        assert s.street_raw == "Нова 13" and s.singles == []
+
+    def test_block_tag_not_split(self):
+        # Housing-estate block tags are 1-2 letters glued to a digit — must stay whole on the
+        # number side, never split into "name + number".
+        s = parse_coverage("Михаила Пупина С-1")[0]
+        assert s.street_raw == "Михаила Пупина" and s.unknown_tokens == ["С-1"]
+
+    def test_house_suffix_letter_not_glued(self):
+        # Digit-then-letter (a house suffix "8А") is the other direction — untouched.
+        s = parse_coverage("Косовска 8А")[0]
+        assert s.street_raw == "Косовска" and s.singles == [[8, "А"]]
+
+
+class TestGluedNameWords:
+    """Two name words glued with no space ("КраљаАлександра") are split by _CAMEL_GLUE on the
+    lower->upper case boundary, which marks a word break in Serbian Title-Case names."""
+
+    def test_two_words_split(self):
+        assert parse_coverage("КраљаАлександра")[0].street_raw == "Краља Александра"
+
+    def test_three_words_split(self):
+        assert parse_coverage("ПутКнезаМихајла")[0].street_raw == "Пут Кнеза Михајла"
+
+    def test_all_caps_tail_not_split(self):
+        # "СолунСКА" is a mis-cased "СОЛУНСКА" (one word) — the uppercase tail does not begin a
+        # Title-Case word, so it must stay whole.
+        assert parse_coverage("СолунСКА")[0].street_raw == "СолунСКА"
+
+    def test_glued_words_and_number(self):
+        # Combines with _NAME_NUM_GLUE: word split + house number split off.
+        s = parse_coverage("КраљаАлександра72")[0]
+        assert s.street_raw == "Краља Александра" and s.singles == [[72, ""]]
+
+    def test_spaced_name_unchanged(self):
+        # Correctly spaced text has no lower->upper adjacency — idempotent.
+        assert parse_coverage("Краља Александра")[0].street_raw == "Краља Александра"
+
+
 class TestCompoundINames:
     def test_compound_name_kept_whole_when_register_has_it(self):
         reg = {"ЗРИЊСКОГ И ФРАНКОПАНА"}
@@ -523,3 +583,106 @@ class TestNumberParenUnwrap:
         for raw in ("Корзо (Бориса Кидрича)", "Елека Бенедека (493. нова)"):
             segs = parse_coverage(raw)
             assert segs[0].street_raw == raw
+
+
+class TestLjubovijaDirectives:
+    """Ljubovija `(и то: …)` number directives with `бројеви кућа` and settlement-assignment
+    clarifications — see docs/parsing-matching/02 §2.16."""
+
+    def _one(self, raw, street):
+        segs = parse_coverage(raw)
+        seg = next(s for s in segs if s.street_raw == street)
+        return segs, seg
+
+    def test_comma_before_paren_attaches_ranges(self):
+        # Station 12, the reported case: a comma before the paren must not strand the ranges
+        # on a phantom "то:" street — they belong to the preceding "Крупањски пут".
+        raw = ("Расадничка, Ћуверска, Живановићка, Крупањски пут, (и то: непарни бројеви кућа од "
+               "155 – 237, парни бројеви кућа од  152 – 258), Тисићка")
+        segs, seg = self._one(raw, "Крупањски пут")
+        assert seg.intervals == [[155, 237, "odd"], [152, 258, "even"]]
+        names = [s.street_raw for s in segs]
+        assert "то:" not in names and "то" not in names
+        assert all(not s.unknown_tokens for s in segs)
+        assert names == ["Расадничка", "Ћуверска", "Живановићка", "Крупањски пут", "Тисићка"]
+
+    def test_attached_paren_directive(self):
+        # Station 2: paren glued to the name, "и то" + "бројеви кућа" dropped.
+        _, seg = self._one("Моше Пијаде (и то непарни бројеви кућа од 1 – 39)", "Моше Пијаде")
+        assert seg.intervals == [[1, 39, "odd"]] and not seg.unknown_tokens
+
+    def test_only_even_whole_side(self):
+        # "и то само парни бројеви кућа" = the whole even side, no range.
+        _, seg = self._one("Моше Пијаде (и то само парни бројеви кућа)", "Моше Пијаде")
+        assert seg.intervals == [[2, OPEN_END, "even"]] and not seg.whole
+
+    def test_settlement_assignment_clarification_dropped(self):
+        # Station 5: the "од којих … припадају насељу X" clarification is redundant and must
+        # not inject sub-ranges or unknown tokens; only the two parent ranges survive.
+        raw = ("Ужички пут (и то: непарни бројеви кућа од 1 – 105, од којих бројеви од 1 – 59 "
+               "припадају насељу Љубовија а бројеви од 61 – 105 припадају насељу Дубоко, парни "
+               "бројеви кућа од 2 – 80, од којих бројеви од 2 – 54 припадају насељу Љубовија а "
+               "бројеви од 56 -80 припадају насељу Дубоко), Милунке Савић")
+        segs, seg = self._one(raw, "Ужички пут")
+        assert seg.intervals == [[1, 105, "odd"], [2, 80, "even"]]
+        assert [s.street_raw for s in segs] == ["Ужички пут", "Милунке Савић"]
+        assert all(not s.unknown_tokens for s in segs)
+
+    def test_chained_continuation_no_phantom_street(self):
+        # Station 14: a chained ", а бројеви … припадају насељу" continuation must not become a
+        # phantom "а" street, and a bare "насеље X" label inside a directive is dropped.
+        raw = ("Зворнички Пут (и то: непарни бројеви кућа од 531 – 701, од којих бројеви од 531 – "
+               "541 припадају насељу Селанац, а бројеви од 543-701 припадају насељу Црнча, парни "
+               "бројеви кућа од 660 – 818, од којих бројеви од 660 – 674 припадају насељу Селанац, "
+               "а бројеви од 676-818 припадају насељу Црнча), Липничка")
+        segs, seg = self._one(raw, "Зворнички Пут")
+        assert seg.intervals == [[531, 701, "odd"], [660, 818, "even"]]
+        names = [s.street_raw for s in segs]
+        assert names == ["Зворнички Пут", "Липничка"]
+        assert "а" not in names and all(not s.unknown_tokens for s in segs)
+
+    def test_inline_pripadaju_tail_truncated(self):
+        # Station 9 "Крупањски пут": "… 1 -7 који припадају насељу Грачаница" — keep the range,
+        # cut the inline relative clause.
+        raw = ("Крупањски пут (и то: непарни бројеви кућа од 1 -7 који припадају насељу Грачаница, "
+               "парни бројеви кућа од 2 – 6 који припадају насељу Лоњин), Заселак Биљићи")
+        _, seg = self._one(raw, "Крупањски пут")
+        assert seg.intervals == [[1, 7, "odd"], [2, 6, "even"]]
+        assert not seg.unknown_tokens
+
+    def test_a_connector_continuation_attaches(self):
+        # Station 5 "Буковичка": "непарни … 1 – 7, а парни … 18 – 28" — the "а" connector must
+        # not become a phantom street; both ranges land on Буковичка.
+        raw = "Буковичка (и то: непарни бројеви кућа од  1 – 7, а парни бројеви кућа од  18 – 28)"
+        segs, seg = self._one(raw, "Буковичка")
+        assert seg.intervals == [[1, 7, "odd"], [18, 28, "even"]]
+        assert [s.street_raw for s in segs] == ["Буковичка"]
+
+    def test_single_house_directive(self):
+        # Station 33 "Зобнашка (и то кућа број 41)" — a non-parity single, not a phantom street.
+        raw = "Зобнашка (и то кућа број 41), Брезичка"
+        segs, seg = self._one(raw, "Зобнашка")
+        assert seg.singles == [[41, ""]] and not seg.intervals and not seg.unknown_tokens
+        assert [s.street_raw for s in segs] == ["Зобнашка", "Брезичка"]
+
+    def test_dangling_paren_typo(self):
+        # Station 24 source typo: an extra ')' closes the paren early, leaving "80-116)".
+        raw = ("Шапарска (и то: непарни бројеви кућа од 53 – 95), парни бројеви кућа од 80 – 116), "
+               "Миличићка")
+        segs, seg = self._one(raw, "Шапарска")
+        assert seg.intervals == [[53, 95, "odd"], [80, 116, "even"]]
+        assert [s.street_raw for s in segs] == ["Шапарска", "Миличићка"]
+
+    def test_settlement_scope_preamble_stripped(self):
+        # Stations 10/15: "у насељу <Name>:" scope marker is stripped, comma separator kept so
+        # the preceding street is not glued onto the following one.
+        raw = "Заселак Дубоки поток, у насељу Соколац: Брдарска (и то парни бројеви кућа од 68 – 82)"
+        segs = parse_coverage(raw)
+        names = [s.street_raw for s in segs]
+        assert names == ["Заселак Дубоки поток", "Брдарска"]
+        assert segs[1].intervals == [[68, 82, "even"]]
+
+    def test_ordinary_directive_paren_unchanged(self):
+        # Guard: a non-Ljubovija directive paren (no clarification noise) is untouched.
+        segs = parse_coverage("Омладинска (сви непарни бројеви)")
+        assert segs[0].street_raw == "Омладинска" and segs[0].intervals == [[1, OPEN_END, "odd"]]
