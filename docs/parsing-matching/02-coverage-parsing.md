@@ -297,6 +297,23 @@ These are skipped (consumed, no effect on the parse):
 - `бр.`/`број`/`броја`/`бројеви` (`is_broj_token`, the number label),
 - `па` ("and onwards"), `на` and `страна`/`страни`/`стране`/`страну` (side‑of‑street phrasing).
 
+### Filler house number `0` (`parse_number_token`)
+
+**Rule:** a bare `0` house number is **dropped** — register numbering starts at 1, so house
+`0` is never a real address. Documents write it as filler meaning "the whole street/settlement,
+no specific number":
+
+- `Блендија 0` → `0` dropped → no numbers left → **whole** claim (`_new_segment` sets
+  `whole=True`); the name resolves as the whole street, or as a whole‑**settlement** claim
+  when `Блендија` is a settlement (see [05](05-street-resolution.md) §5.12). Before this the
+  segment claimed only house `0`, matched nothing, and was flagged `no_match`.
+- `Школска 0 1 2` → the leading `0` is a phantom; dropped, the real list `1, 2` is the
+  coverage.
+
+Only a **bare** `0` (empty suffix) is filler; a suffixed `0а`/`0бб` is left as a single
+(different, rarer markers handled elsewhere). A range bound (`0‑50`) is also untouched — there
+`0` is just a lower bound that includes everything up to 50.
+
 ### `од N до M` / `од N до краја` ranges
 
 **Rule:** a house number followed by `до` ("to") forms a range. `до` is treated as a

@@ -177,7 +177,17 @@ def parse_number_token(tok: str, seg: Segment) -> None:
         return
     m = _SINGLE.match(t)
     if m:
-        seg.singles.append([int(m.group(1)), normalize_suffix(m.group(2) or "")])
+        num = int(m.group(1))
+        sfx = normalize_suffix(m.group(2) or "")
+        # House number "0" is not a real address — register numbering starts at 1. Documents
+        # write a bare "0" as filler meaning "the whole street/settlement, no specific number"
+        # ("Блендија 0", "Школска 0, 1, 2"). Drop it: when "0" is the segment's only token the
+        # name then resolves as a WHOLE claim (see _new_segment); when it rides alongside a real
+        # number list it was only ever a phantom house-0 single that matched nothing. A suffixed
+        # "0а"/"0бб" is left untouched (different, rarer markers handled elsewhere).
+        if num == 0 and not sfx:
+            return
+        seg.singles.append([num, sfx])
         return
     seg.unknown_tokens.append(t)
 

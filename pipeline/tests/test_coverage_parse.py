@@ -88,6 +88,15 @@ class TestParseNumberToken:
         # A block tag routed through the number classifier lands in unknown_tokens.
         assert _num("А-21").unknown_tokens == ["А-21"]
 
+    def test_bare_zero_dropped(self):
+        # "0" is filler (no real house number) — dropped entirely, not a single.
+        s = _num("0")
+        assert s.singles == [] and s.intervals == [] and s.unknown_tokens == []
+
+    def test_suffixed_zero_kept(self):
+        # Only a BARE "0" is filler; "0а" is left as a single (handled elsewhere).
+        assert _num("0а").singles == [[0, "А"]]
+
 
 class TestIntervalParity:
     @pytest.mark.parametrize("lo,hi,parity", [
@@ -116,6 +125,18 @@ class TestCompactBasics:
     def test_multiple_streets_split_on_comma(self):
         segs = parse_compact("Прва 1-10, Друга, Трећа 2-8")
         assert [s.street_raw for s in segs] == ["Прва", "Друга", "Трећа"]
+
+    def test_name_with_only_zero_is_whole(self):
+        # "Блендија 0": the filler "0" is dropped, leaving a whole-name claim (whole settlement
+        # or street) — not a single matching the nonexistent house 0.
+        segs = parse_compact("Блендија 0")
+        assert _segtuples(segs) == [("Блендија", True, False, [], [], [], "whole_street")]
+
+    def test_leading_zero_before_number_list(self):
+        # A phantom "0" ahead of a real number list is dropped; the list is the coverage.
+        segs = parse_compact("Школска 0 1 2")
+        assert _segtuples(segs) == [
+            ("Школска", False, False, [], [[1, ""], [2, ""]], [], "street_numbers")]
 
 
 class TestCompactContinuation:
@@ -419,11 +440,12 @@ class TestSideOfStreetParity:
         assert segs[0].intervals == [[1, OPEN_END, "odd"]]
 
     def test_side_directive_continues_previous_street(self):
-        # "и непарни бројеви" as its own clause qualifies the previous street.
+        # "и непарни бројеви" as its own clause qualifies the previous street. The filler "0"
+        # house number is dropped (register has no house 0), leaving just the odd-side claim.
         segs = parse_compact("Краља Петра Првог 0 и непарни бројеви")
         assert len(segs) == 1
         s = segs[0]
-        assert s.singles == [[0, ""]] and s.intervals == [[1, OPEN_END, "odd"]]
+        assert s.singles == [] and s.intervals == [[1, OPEN_END, "odd"]]
 
     def test_side_before_range(self):
         # "непарни од 1 до 9 и парни од 14 до 86" -> two parity-split ranges, one street.
