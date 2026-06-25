@@ -693,6 +693,75 @@ def resolve_street(street_raw, muni, settlement_id, idx, settlement_inferred=Fal
     return None, "none", 0.0, []
 
 
+# Pass-1 methods that are TRUSTED evidence a station covers a given settlement, so that
+# settlement joins the station's multi-settlement scope. EXACT/declension and the hand-aliased
+# match are in-settlement by construction; a muni_fallback is an exact name UNIQUE in the
+# municipality (a confident cross-settlement match, just flagged because it's not the home
+# settlement) — the dominant spanning signal (~840 segments). base_parts/locality are
+# register-confirmed. Deliberately EXCLUDED: fuzzy/abbrev (typo guesses), proximity
+# (geographic last resort), ambiguous/none (unresolved) — trusting them would amplify errors.
+_SETT_EVIDENCE_METHODS = {"exact", "alias", "muni_fallback", "base_parts", "locality"}
+
+
+def derive_station_settlements(seg_recs, station_settlement, street_meta) -> dict[int, set[str]]:
+    """Per station, the SET of settlements its coverage touches, from pass-1 results:
+    the address home (always, so the scope never shrinks), the settlement of every TRUSTED
+    street match (`_SETT_EVIDENCE_METHODS`, read from the resolved street's own settlement so
+    settlement-prefix / part-street matches count under the right village), every explicit
+    in-document settlement label/marker, and every whole-settlement claim."""
+    setts: dict[int, set[str]] = {}
+    for r in seg_recs:
+        st = r["station_id"]
+        acc = setts.setdefault(st, set())
+        home = station_settlement.get(st)
+        if home:
+            acc.add(home)
+        sid = r["street_id"]
+        if sid in street_meta and (
+            r["method"] in _SETT_EVIDENCE_METHODS
+            or r["method"] in ("settlement", "manual_settlement")
+        ):
+            acc.add(street_meta[sid]["settlement_id"])
+        if r.get("seg_sett"):
+            acc.add(r["seg_sett"])
+        if r.get("marker_sett"):
+            acc.add(r["marker_sett"])
+    return setts
+
+
+def resolve_street_multi(street_raw, muni, settlement_ids, idx
+                         ) -> tuple[str | None, str, float, list[str]]:
+    """Resolve a street against a station's WHOLE set of covered settlements (not just home).
+
+    Probes the unmodified `resolve_street` once per settlement and keeps only CLEAN
+    in-settlement matches (`_SETT_EVIDENCE_METHODS` minus muni_fallback — i.e. the rungs that
+    return from sett_scope: exact/alias/base_parts/locality). Adjudicates by the number of
+    DISTINCT settlements the kept matches resolve into:
+      1   -> that clean match (its native method/score; an exact stays unflagged)
+      >=2 -> (None, 'ambiguous', 0.0, [winning ids]) — genuine cross-settlement ambiguity
+      0   -> (None, 'none', 0.0, []) so the caller keeps the pass-1 result (never a downgrade)
+    """
+    clean = {"exact", "alias", "base_parts", "locality"}
+    street_meta = idx[0]
+    best_by_sett: dict[str, tuple[str, str, float, list]] = {}
+    for sid in settlement_ids:
+        res_id, method, score, amb = resolve_street(
+            street_raw, muni, sid, idx, settlement_inferred=False)
+        if res_id is None or method not in clean or res_id not in street_meta:
+            continue
+        rsett = street_meta[res_id]["settlement_id"]
+        # First clean hit per resolved settlement wins (probes are independent; an exact in a
+        # settlement is unique there). Prefer a higher score if two probes reach the same one.
+        prev = best_by_sett.get(rsett)
+        if prev is None or score > prev[2]:
+            best_by_sett[rsett] = (res_id, method, score, amb)
+    if not best_by_sett:
+        return None, "none", 0.0, []
+    if len(best_by_sett) == 1:
+        return next(iter(best_by_sett.values()))
+    return None, "ambiguous", 0.0, [v[0] for v in best_by_sett.values()]
+
+
 def _iv_parity(iv: list) -> str:
     return iv[2] if len(iv) > 2 else interval_parity(iv[0], iv[1])
 
@@ -1015,8 +1084,41 @@ def main() -> int:
                     pass
 
         rec = {**s, "parsed": parsed, "street_id": street_id, "method": method, "score": score,
-               "amb_ids": amb_ids, "has_paren": bool(_PAREN_RE.search(s["street_raw"]))}
+               "amb_ids": amb_ids, "has_paren": bool(_PAREN_RE.search(s["street_raw"])),
+               # Explicit settlement signals captured for the multi-settlement scope derivation
+               # below (a station spanning villages: each is evidence the station covers it).
+               "seg_sett": seg_sett, "marker_sett": marker_sett}
         seg_recs.append(rec)
+
+    # Pass 1.5: multi-settlement scope. A polling station can cover several settlements
+    # (villages) — 906 already resolve streets into >1 settlement, mostly via the FLAGGED
+    # muni_fallback path, and a street whose name also exists elsewhere falls to 'ambiguous'
+    # (unmatched) because pass 1 scoped it to the single home settlement. So: derive each
+    # station's SET of covered settlements from its pass-1 matches, then re-resolve every
+    # still-UNMATCHED segment (method none/ambiguous) against that whole set — a clean
+    # in-settlement exact in one of the station's own villages beats leaving it unresolved.
+    station_setts = derive_station_settlements(seg_recs, station_settlement, street_meta)
+    n_multi = 0
+    for r in seg_recs:
+        # Only rescue genuinely UNMATCHED segments. muni_fallback/fuzzy segments are already
+        # matched and stay flagged for human review (and a muni_fallback must not clear its own
+        # flag by seeding its own settlement — it CONTRIBUTES to the set, it isn't re-resolved).
+        if r["method"] not in ("none", "ambiguous"):
+            continue
+        setts = station_setts.get(r["station_id"])
+        if not setts or len(setts) < 2:           # single-settlement station: nothing to span
+            continue
+        sid, method, score, amb = resolve_street_multi(
+            r["street_raw"], station_muni[r["station_id"]], sorted(setts), idx)
+        if sid is not None:
+            r["street_id"], r["method"], r["score"], r["amb_ids"] = sid, method, score, amb
+            n_multi += 1
+        elif method == "ambiguous" and r["method"] != "ambiguous":
+            # A former 'none' that is exact in >=2 of the station's settlements: surface the
+            # genuine cross-settlement ambiguity (its candidates feed the proximity tie-break).
+            r["method"], r["amb_ids"] = "ambiguous", amb
+    if n_multi:
+        print(f"  multi-settlement matches: {n_multi:,}")
 
     # Old-name restatements: documents list a renamed street twice per station — once with
     # current numbers ("Београдски пут 127-166") and once under the old name with the OLD
@@ -1345,6 +1447,17 @@ def main() -> int:
     sett_claims_df = pl.DataFrame(
         sett_claims, schema={"station_id": pl.Int64, "settlement_id": pl.String}
     ).unique()
+    # Assumed settlement set per station (matching scope + UI display): one row per
+    # (station, settlement); the address home is role 'home', every other covered settlement
+    # 'spanned'. Stable wrt pass 1.5 (it only re-resolves WITHIN this set, never grows it).
+    sett_set_rows = [
+        {"station_id": st, "settlement_id": s,
+         "role": "home" if s == station_settlement.get(st) else "spanned"}
+        for st, members in station_setts.items() for s in sorted(members)
+    ]
+    station_setts_df = pl.DataFrame(
+        sett_set_rows, schema={"station_id": pl.Int64, "settlement_id": pl.String, "role": pl.String}
+    ).unique()
     osm_claims_df = pl.DataFrame(osm_claims, schema={
         "station_id": pl.Int64, "segment_id": pl.Int64, "kind": pl.String,
         "query": pl.String, "osm_type": pl.String, "osm_id": pl.String, "wkt": pl.String,
@@ -1354,6 +1467,7 @@ def main() -> int:
         pl.DataFrame(out_segs, infer_schema_length=None).write_parquet(config.SEGMENTS_PARQUET)
         pl.DataFrame(links, infer_schema_length=None).write_parquet(config.LINKS_PARQUET)
         sett_claims_df.write_parquet(config.STATION_SETT_CLAIMS_PARQUET)
+        station_setts_df.write_parquet(config.STATION_SETTLEMENTS_PARQUET)
         osm_claims_df.write_parquet(config.OSM_CLAIMS_PARQUET)
     else:
         # Merge into the complete parquets: drop every affected station's old segments and
@@ -1382,6 +1496,16 @@ def main() -> int:
                 config.STATION_SETT_CLAIMS_PARQUET)
         else:
             sett_claims_df.write_parquet(config.STATION_SETT_CLAIMS_PARQUET)
+        # Assumed settlement set: drop affected stations' rows, append the fresh ones.
+        if config.STATION_SETTLEMENTS_PARQUET.exists():
+            prev_ss = pl.read_parquet(config.STATION_SETTLEMENTS_PARQUET)
+            ss_parts = [prev_ss.filter(~pl.col("station_id").is_in(affected))]
+            if station_setts_df.height:
+                ss_parts.append(station_setts_df.select(prev_ss.columns))
+            pl.concat(ss_parts, how="vertical_relaxed").unique().write_parquet(
+                config.STATION_SETTLEMENTS_PARQUET)
+        else:
+            station_setts_df.write_parquet(config.STATION_SETTLEMENTS_PARQUET)
         # OSM-claim geometry: drop affected stations' rows, append the fresh ones.
         if config.OSM_CLAIMS_PARQUET.exists():
             prev_osm = pl.read_parquet(config.OSM_CLAIMS_PARQUET)

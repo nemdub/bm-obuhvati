@@ -93,6 +93,14 @@ if [ "$IMPORT" = 1 ]; then
     echo "-- nothing to import; D1 already matches the recompute"
   fi
 
+  # Assumed settlement set: small station-keyed table, full DELETE+reINSERT each pass (a few
+  # batched statements). Applied after the derived import so polling_stations exist (FK).
+  SETT_SQL="$DIR/artifacts/import_station_settlements.sql"
+  if [ "$IMPORT_OK" = 1 ] && [ -s "$SETT_SQL" ]; then
+    echo "-- importing station_settlements into remote D1"
+    "$DIR/d1_apply.sh" "$SETT_SQL" || IMPORT_OK=0
+  fi
+
   if [ "$IMPORT_OK" = 1 ]; then
     # Import succeeded (or nothing to write) -> advance the derived-state manifest so the next
     # run diffs against what D1 now holds. Done only here, after a clean import, so a failed

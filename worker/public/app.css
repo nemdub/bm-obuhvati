@@ -68,6 +68,10 @@ tr.section-head td { font-weight: 700; background: #eef2f6; color: var(--muted, 
 .panel h1 { font-size: 18px; }
 .addr { color: var(--muted); margin-top: -8px; }
 .addr-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.assumed-setts { font-size: 13px; margin: 4px 0 8px; }
+.assumed-setts .label { color: var(--muted); }
+.assumed-setts .sett.home { font-weight: 600; }
+.assumed-setts .tag { color: var(--muted); font-weight: 400; font-size: 11px; }
 .tt-addr { color: #666; font-size: 11px; }
 .map-legend {
   background: #fff; padding: 8px 10px; border-radius: 6px; line-height: 1.5;

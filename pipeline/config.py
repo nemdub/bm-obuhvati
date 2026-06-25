@@ -28,6 +28,7 @@ STREETS_PARQUET = ARTIFACTS_DIR / "streets.parquet"
 STREET_GEOMETRY_PARQUET = ARTIFACTS_DIR / "street_geometry.parquet"  # WGS84 line geometry for no-house streets
 SETTLEMENT_GEOMETRY_PARQUET = ARTIFACTS_DIR / "settlement_geometry.parquet"  # UTM34N settlement boundary polygons (WKT)
 STATION_SETT_CLAIMS_PARQUET = ARTIFACTS_DIR / "station_settlement_claims.parquet"  # station_id -> claimed settlement_id (whole-settlement coverage)
+STATION_SETTLEMENTS_PARQUET = ARTIFACTS_DIR / "station_settlements.parquet"  # station_id -> assumed settlement_id + role (home|spanned), for matching scope + UI
 STATIONS_PARQUET = ARTIFACTS_DIR / "stations.parquet"
 AMENDMENTS_RAW_PARQUET = ARTIFACTS_DIR / "amendments_raw.parquet"  # raw amendment doc text
 SEGMENTS_RAW_PARQUET = ARTIFACTS_DIR / "segments_raw.parquet"        # stage03 output

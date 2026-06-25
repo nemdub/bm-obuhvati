@@ -65,6 +65,9 @@ TABLES: dict[str, tuple[Path, list[str]]] = {
     "street_geometry": (config.STREET_GEOMETRY_PARQUET, [
         "street_id", "geojson",
     ]),
+    "station_settlements": (config.STATION_SETTLEMENTS_PARQUET, [
+        "station_id", "settlement_id", "role",
+    ]),
 }
 
 # Three load groups (avoids FK violations without relying on PRAGMA toggles, which
@@ -547,6 +550,16 @@ def main() -> int:
             ["street_geometry"], ["street_geometry"], path,
         )
         print(f"  street_geometry: {counts['street_geometry']:,} rows -> {path}")
+
+    # Assumed settlement set per station (re-runnable, station-keyed, small -> own file,
+    # applied by recompute.sh after the derived import). DELETE+reINSERT each pass.
+    if "station_settlements" in present:
+        path = config.ARTIFACTS_DIR / "import_station_settlements.sql"
+        counts = dump_group(
+            {"station_settlements": present["station_settlements"]},
+            ["station_settlements"], ["station_settlements"], path,
+        )
+        print(f"  station_settlements: {counts['station_settlements']:,} rows -> {path}")
 
     # Polygons -> per-municipality R2 blobs (served from object storage, not D1).
     if "polygons" in present and "polling_stations" in present:

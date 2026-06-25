@@ -474,3 +474,64 @@ class TestSettlementPrefix:
     def test_no_false_match_for_unknown_street(self):
         assert S4.resolve_street("Рибаре – Непостојећа", MUNI, "LOV", self._idx())[:2] == (
             None, "none")
+
+
+class TestMultiSettlementScope:
+    """`resolve_street_multi` + `derive_station_settlements` — a station that spans several
+    settlements (§5.x / docs). The matcher derives the station's covered-settlement SET from
+    its trusted pass-1 matches, then re-resolves still-unmatched segments against the whole
+    set so a clean exact in a NON-home village wins over leaving it unresolved."""
+
+    def test_spanned_exact_unflagged(self, idx):
+        # "Дунавска" is absent from home S1, exact in spanned S2 → clean exact (not muni_fallback).
+        assert S4.resolve_street_multi("Дунавска", MUNI, ["S1", "S2"], idx) == (
+            "st6", "exact", 100.0, [])
+
+    def test_two_spanned_settlements_ambiguous(self):
+        # Same name in two of the station's settlements → genuine ambiguity, nothing linked.
+        idx = make_index(
+            {"S1": {"st1": "Прва"}, "S2": {"st10": "Главна"}, "S3": {"st11": "Главна"}},
+            {"S1": "Једно", "S2": "Два", "S3": "Три"},
+        )
+        sid, method, score, amb = S4.resolve_street_multi("Главна", MUNI, ["S1", "S2", "S3"], idx)
+        assert sid is None and method == "ambiguous" and score == 0.0
+        assert sorted(amb) == ["st10", "st11"]
+
+    def test_no_downgrade_when_absent_everywhere(self, idx):
+        # A name in NONE of the set's settlements → 'none', so the caller keeps the pass-1 result.
+        assert S4.resolve_street_multi("Непостојећа", MUNI, ["S1", "S2"], idx) == (
+            None, "none", 0.0, [])
+
+    def test_set_growth_trusted_methods_only(self):
+        # muni_fallback (unique-name) and exact ADD their settlement; fuzzy/proximity/ambiguous
+        # do NOT (they would amplify a wrong guess). Home is always present.
+        street_meta = {
+            "x_exact": {"settlement_id": "S2"},
+            "x_muni": {"settlement_id": "S3"},
+            "x_fuzzy": {"settlement_id": "S9"},
+        }
+        seg_recs = [
+            {"station_id": 100, "street_id": "x_exact", "method": "exact"},
+            {"station_id": 100, "street_id": "x_muni", "method": "muni_fallback"},
+            {"station_id": 100, "street_id": "x_fuzzy", "method": "fuzzy"},
+        ]
+        setts = S4.derive_station_settlements(seg_recs, {100: "S1"}, street_meta)
+        assert setts[100] == {"S1", "S2", "S3"}
+
+    def test_set_uses_street_meta_settlement(self):
+        # The settlement comes from the RESOLVED street's own settlement (so a settlement-prefix
+        # / part-street match counts under the village it actually resolved into, not the input).
+        street_meta = {"st": {"settlement_id": "S5"}}
+        seg_recs = [{"station_id": 7, "street_id": "st", "method": "base_parts"}]
+        setts = S4.derive_station_settlements(seg_recs, {7: "S1"}, street_meta)
+        assert setts[7] == {"S1", "S5"}
+
+    def test_set_includes_explicit_label_and_marker(self):
+        seg_recs = [
+            {"station_id": 1, "street_id": None, "method": "none",
+             "seg_sett": "S2", "marker_sett": None},
+            {"station_id": 1, "street_id": None, "method": "ambiguous",
+             "seg_sett": None, "marker_sett": "S3"},
+        ]
+        setts = S4.derive_station_settlements(seg_recs, {1: "S1"}, {})
+        assert setts[1] == {"S1", "S2", "S3"}

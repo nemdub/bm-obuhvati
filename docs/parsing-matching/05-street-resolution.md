@@ -443,6 +443,42 @@ a typo reports `fuzzy`. Global (every muni), like `_part_streets`/`_locality_str
 register guard keeps it inert where the convention isn't used. Tested in
 `TestSettlementPrefix`.
 
+## 5.18 Multi‑settlement scope (`derive_station_settlements` / `resolve_street_multi`, pass 1.5)
+
+The ladder (5.1) scopes every un‑labelled segment to the station's **single** home settlement
+(from its address), so a street that lives in **another** settlement the station also covers can
+only match via the *flagged* muni‑fallback (5.5) or fall to `ambiguous`. But a polling station
+routinely **spans several villages** (≈900 already resolve streets into >1 settlement). Pass 1.5
+makes the scope a **set**.
+
+**Derive the set** (`derive_station_settlements`, from pass‑1 results only). Per station, the
+union of:
+- the **address home** (always — the scope never shrinks);
+- the settlement of every **trusted** pass‑1 match — `_SETT_EVIDENCE_METHODS` =
+  `{exact, alias, muni_fallback, base_parts, locality}` — read from the **resolved street's own**
+  `settlement_id` (so a settlement‑prefix / part‑street match counts under the village it really
+  resolved into). A `muni_fallback` is an exact name **unique in the municipality** — a confident
+  cross‑settlement match (just flagged because it's not the home), and the **dominant** spanning
+  signal. `fuzzy`/`abbrev`/`proximity`/`ambiguous` are **excluded** — trusting a typo/coin‑flip
+  guess would amplify into wrong "exact" matches elsewhere;
+- explicit in‑document settlements (`seg_sett` label, `marker_sett`) and whole‑settlement claims.
+
+**Re‑resolve** (`resolve_street_multi`). After pass 1, for every segment still **unmatched**
+(`method ∈ {none, ambiguous}`) whose station spans ≥2 settlements, probe the unmodified
+`resolve_street` once per settlement in the set and adjudicate by the number of **distinct
+settlements** a clean in‑settlement match (`exact/alias/base_parts/locality`) resolves into:
+**1** → that clean match wins (an `exact` is unflagged); **≥2** → genuine cross‑settlement
+`ambiguous` (its candidates feed the proximity tie‑break, 5.14); **0** → keep the pass‑1 result
+(never a downgrade). Already‑matched `muni_fallback`/`fuzzy` segments are left untouched — they
+**contribute** to the set but are not re‑resolved, so a flag is never self‑cleared and the
+typo/cross‑settlement guesses stay surfaced for review.
+
+Runs **after** pass 1 (so the set is complete) and **before** the proximity/OSM passes (so
+geography stays the last resort). The assumed set (home + spanned) is persisted to
+`station_settlements` (D1) and shown on the station page. Incremental `--municipalities` is
+muni‑local and correct (all of an affected station's segments are loaded). Tested in
+`TestMultiSettlementScope`.
+
 ## 5.14 (cont.) Proximity worked example
 
 > Worked example — `Рзавска` (Arilje area): the doc street isn't in the station's home

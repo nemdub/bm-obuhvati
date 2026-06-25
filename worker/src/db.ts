@@ -78,6 +78,15 @@ export interface StationRow {
   removed?: number;
   /** Raw text comes from a station_text_overrides correction, not stage02 extraction. */
   text_overridden?: number;
+  /** Settlements the matcher assumes this station covers (home + spanned). Read-only display. */
+  assumed_settlements?: AssumedSettlement[];
+}
+
+export interface AssumedSettlement {
+  id: string;
+  role: string; // 'home' | 'spanned'
+  name_cyr: string;
+  name_lat: string;
 }
 
 export interface SegmentRow {
@@ -252,7 +261,23 @@ export async function getStation(db: D1Database, id: number): Promise<StationRow
     st.raw_coverage_text = st.ov_text;
     st.text_overridden = 1;
   }
+  st.assumed_settlements = await assumedSettlements(db, id);
   return st;
+}
+
+/** Settlements the matcher assumes a station covers (home first, then spanned alphabetically). */
+export async function assumedSettlements(db: D1Database, stationId: number): Promise<AssumedSettlement[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT ss.settlement_id AS id, ss.role, s.name_cyr, s.name_lat
+         FROM station_settlements ss
+         JOIN settlements s ON s.id = ss.settlement_id
+        WHERE ss.station_id = ?
+        ORDER BY (ss.role = 'home') DESC, s.name_cyr`
+    )
+    .bind(stationId)
+    .all<AssumedSettlement>();
+  return results ?? [];
 }
 
 /** Ids of stations tombstoned in a municipality — excluded from maps and exports so a

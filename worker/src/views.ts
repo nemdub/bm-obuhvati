@@ -194,6 +194,18 @@ export function stationsView(
   );
 }
 
+/** The settlement(s) the matcher assumes a station covers — home emphasized, spanned listed
+ *  after. Read-only context so the reviewer sees the matcher's scope assumption. */
+function assumedSettlementsBlock(c: Context, st: StationRow) {
+  const setts = st.assumed_settlements ?? [];
+  if (!setts.length) return "";
+  const script = getScript(c);
+  const t = makeT(script);
+  return html`<p class="assumed-setts"><span class="label">${t("assumedSettlements")}:</span>
+    ${setts.map((s, i) => html`${i ? ", " : ""}<span class="sett ${s.role === "home" ? "home" : ""}"
+      >${tr(s.name_cyr, script)}${s.role === "home" ? html` <span class="tag">(${t("homeSettlement")})</span>` : ""}</span>`)}</p>`;
+}
+
 export function stationDetailView(c: Context, st: StationRow, muniName: string) {
   const script = getScript(c);
   const t = makeT(script);
@@ -214,6 +226,7 @@ export function stationDetailView(c: Context, st: StationRow, muniName: string) 
             ${st.is_added ? html`<span class="badge ok">${t("addedStation")}</span>` : ""}
             ${st.removed ? html`<span class="badge warn">${t("stationRemoved")}</span>` : ""}</h1>
           <p class="addr">${addr}</p>
+          ${assumedSettlementsBlock(c, st)}
           ${st.removed ? html`<div class="removed-banner">${t("stationRemoved")}</div>` : ""}
           <div class="source" id="source">
             <div class="source-label">${t("rawText")}${st.text_overridden ? html` <span class="badge ok">${t("textCorrected")}</span>` : ""}</div>

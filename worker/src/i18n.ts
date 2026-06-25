@@ -17,6 +17,8 @@ export const STRINGS = {
   coverage: "Обухват",
   segments: "Сегменти обухвата",
   rawText: "Изворни текст",
+  assumedSettlements: "Претпостављена насеља",
+  homeSettlement: "матично",
   needsReview: "За проверу",
   reviewReason: "Разлог за проверу",
   reviewed: "Проверено",
