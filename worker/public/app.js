@@ -171,10 +171,16 @@
   // Coverage-editing controls (whole / бб / ranges / singles) shared by the parsed-segment
   // editor, the added-street card, and the add-street panel. Returns the wrapper element
   // plus collect(reviewed) that reads the live values into a parsed-coverage payload.
-  function coverageEditor(parsed) {
+  function coverageEditor(parsed, onChange) {
     parsed = parsed || {};
+    const fire = () => onChange && onChange();
     const wrap = document.createElement("div");
     wrap.className = "coverage-editor";
+    // Any field edit (typing in a bound, toggling a checkbox, changing a parity select)
+    // bubbles to one of these; row add/remove call fire() directly. Lets the card track
+    // whether the reviewer actually changed anything (drives the Save / review buttons).
+    wrap.addEventListener("input", fire);
+    wrap.addEventListener("change", fire);
 
     // whole-street toggle
     const wholeLbl = document.createElement("label");
@@ -197,11 +203,11 @@
     ivWrap.className = "field";
     ivWrap.innerHTML = `<span class="flabel">${L_.ranges}</span>`;
     const ivList = document.createElement("div");
-    (parsed.intervals || []).forEach((iv) => ivList.appendChild(intervalRow(iv)));
+    (parsed.intervals || []).forEach((iv) => ivList.appendChild(intervalRow(iv, fire)));
     const addIv = document.createElement("button");
     addIv.className = "mini add";
     addIv.textContent = "+ " + L_.addRange;
-    addIv.onclick = () => ivList.appendChild(intervalRow([0, 0]));
+    addIv.onclick = () => { ivList.appendChild(intervalRow([0, 0], fire)); fire(); };
     ivWrap.append(ivList, addIv);
 
     // singles
@@ -209,14 +215,23 @@
     sgWrap.className = "field";
     sgWrap.innerHTML = `<span class="flabel">${L_.singles}</span>`;
     const sgList = document.createElement("div");
-    (parsed.singles || []).forEach((s) => sgList.appendChild(singleRow(s)));
+    (parsed.singles || []).forEach((s) => sgList.appendChild(singleRow(s, fire)));
     const addSg = document.createElement("button");
     addSg.className = "mini add";
     addSg.textContent = "+ " + L_.addSingle;
-    addSg.onclick = () => sgList.appendChild(singleRow([0, ""]));
+    addSg.onclick = () => { sgList.appendChild(singleRow([0, ""], fire)); fire(); };
     sgWrap.append(sgList, addSg);
 
     wrap.append(wholeLbl, bezLbl, ivWrap, sgWrap);
+
+    // "Цела улица" is mutually exclusive with the number controls: a whole-street claim already
+    // covers every house (incl. no-number ones), so бб / ranges / singles are irrelevant and
+    // ignored on save. Hide them while whole is checked to keep the choice unambiguous.
+    const numControls = [bezLbl, ivWrap, sgWrap];
+    const syncWhole = () => numControls.forEach((el) => { el.style.display = whole.checked ? "none" : ""; });
+    whole.addEventListener("change", syncWhole);
+    syncWhole();
+
     return { el: wrap, collect: (reviewed) => collect(whole, bezBroja, ivList, sgList, reviewed) };
   }
 
@@ -232,18 +247,21 @@
     head.onclick = () => { highlightSeg = highlightSeg === seg.id ? null : seg.id; focusSegment(highlightSeg); };
     const body = document.createElement("div");
     body.className = "seg-body";
-    const editor = coverageEditor(seg.parsed);
+    let dirty = false;
+    const editor = coverageEditor(seg.parsed, () => { dirty = true; save.disabled = false; });
     body.appendChild(editor.el);
     const actions = document.createElement("div");
     actions.className = "seg-actions";
-    actions.appendChild(mkBtn(L_.save, "btn primary", async () => {
+    const save = mkBtn(L_.save, "btn primary", async () => {
       await fetch(`/api/added/${seg.added_id}`, {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(editor.collect(false)),
       });
       flash(actions, L_.saved);
       await reload();
-    }));
+    });
+    save.disabled = !dirty;
+    actions.appendChild(save);
     actions.appendChild(mkBtn(L_.removeAdded, "btn", async () => {
       await fetch(`/api/added/${seg.added_id}`, { method: "DELETE" });
       await reload();
@@ -372,6 +390,12 @@
     // Street picker: lets the reviewer (re)assign the register street — crucial when the
     // street is unresolved or matched to the wrong one. chosenStreet rides along on save.
     let chosenStreet = null; // street id picked in this card session
+    // Whether the reviewer has made any unsaved change in this card (coverage edit or street
+    // pick). Drives the action buttons: Save is enabled only when dirty; "Mark as reviewed"
+    // shows only while the segment still needs review OR something changed (so it reappears
+    // after the reviewer edits an already-reviewed segment). updateActions() is defined below.
+    let dirty = false;
+    const markDirty = () => { dirty = true; updateActions(); };
     const sp = document.createElement("div");
     sp.className = "street-pick";
     const spBtn = mkBtn(L_.changeStreet, "mini add", () => {
@@ -403,6 +427,7 @@
             chosenStreet = r.id;
             spInput.value = streetItemLabel(r);
             spList.innerHTML = "";
+            markDirty();
           };
           spList.appendChild(item);
         });
@@ -419,7 +444,7 @@
     body.appendChild(sp);
 
     // coverage controls (whole / бб / ranges / singles)
-    const editor = coverageEditor(seg.parsed);
+    const editor = coverageEditor(seg.parsed, markDirty);
     body.appendChild(editor.el);
 
     // actions
@@ -442,8 +467,18 @@
       });
       await reload();
     });
+    // Show the right buttons for the current state:
+    //  - Save: enabled only once the reviewer changed something (no pointless save of an
+    //    unchanged segment).
+    //  - "Mark as reviewed": shown while the segment still needs review, or after an unsaved
+    //    change (so it's gone once reviewed, and reappears if the reviewer edits again).
+    function updateActions() {
+      save.disabled = !dirty;
+      reviewed.style.display = (seg.needs_review || dirty) ? "" : "none";
+    }
     actions.appendChild(save);
     actions.appendChild(reviewed);
+    updateActions();
     // Resolve a segment to NO coverage (street_id "none"). Two situations, one mechanism:
     //   - unmatched street: confirm it's absent from the register ("Улица не постоји");
     //   - a wrong/unwanted match the reviewer wants to drop — e.g. a bare settlement name
@@ -490,7 +525,7 @@
     if (!m) return [0, ""];
     return [Number(m[1]), (m[2] || "").trim().toUpperCase()];
   }
-  function intervalRow(iv) {
+  function intervalRow(iv, onChange) {
     const row = document.createElement("div");
     row.className = "row iv";
     const lo = boundInput(iv[0], iv.length > 3 ? iv[3] : "", "lo");
@@ -507,15 +542,16 @@
       par.appendChild(o);
     });
     par.value = iv.length > 2 && iv[2] ? iv[2] : impliedParity(iv[0] || 0, iv[1] || 0);
-    row.append(lo, document.createTextNode("–"), hi, par, rowRemoveBtn(() => row.remove()));
+    row.append(lo, document.createTextNode("–"), hi, par,
+      rowRemoveBtn(() => { row.remove(); onChange && onChange(); }));
     return row;
   }
-  function singleRow(s) {
+  function singleRow(s, onChange) {
     const row = document.createElement("div");
     row.className = "row sg";
     const n = numInput(s[0], "n"), suf = numInput(s[1], "suffix");
     suf.placeholder = L_.suffix;
-    row.append(n, suf, rowRemoveBtn(() => row.remove()));
+    row.append(n, suf, rowRemoveBtn(() => { row.remove(); onChange && onChange(); }));
     return row;
   }
   function collect(whole, bezBroja, ivList, sgList, reviewed) {

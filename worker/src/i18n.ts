@@ -27,7 +27,7 @@ export const STRINGS = {
   doesNotExist: "Улица не постоји",
   discardMatch: "Одбаци",
   streetMissing: "Означено: не постоји",
-  wholeStreet: "Цела улица",
+  wholeStreet: "Цео обухват",
   bezBroja: "Без броја (бб)",
   ranges: "Распони",
   parityAll: "сви",

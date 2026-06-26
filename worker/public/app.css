@@ -135,6 +135,7 @@ tr.section-head td { font-weight: 700; background: #eef2f6; color: var(--muted, 
   color: var(--ink); border-radius: 6px; padding: 5px 12px; font-size: 13px; }
 .btn-export:hover { background: #eef4fb; border-color: var(--blue); color: var(--blue); }
 .btn { border: 1px solid var(--line); background: #fafbfc; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; }
+.btn:disabled { opacity: 0.45; cursor: default; }
 .btn.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
 .btn.danger { color: var(--warn); border-color: #ffd9b0; }
 .btn.danger:hover { background: #fff0e0; }
