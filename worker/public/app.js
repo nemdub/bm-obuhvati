@@ -481,12 +481,13 @@
     updateActions();
     // Resolve a segment to NO coverage (street_id "none"). Two situations, one mechanism:
     //   - unmatched street: confirm it's absent from the register ("Улица не постоји");
-    //   - a wrong/unwanted match the reviewer wants to drop — e.g. a bare settlement name
-    //     that became a whole-settlement claim ("Паси Пољана") when other stations cover
-    //     parts of it ("Одбаци меч"). Shown for any flagged segment, not only unresolved
-    //     ones, so a resolved-but-wrong match can be discarded. Not offered once already
-    //     marked missing, nor for a clean (unflagged) exact match.
-    if (!seg.street_missing && (!seg.street_resolved || seg.needs_review)) {
+    //   - a wrong/unwanted match the reviewer wants to drop ("Одбаци") — e.g. a bare
+    //     settlement name that became a whole-settlement claim ("Паси Пољана") when other
+    //     stations cover parts of it. Offered for ANY resolved segment, including a clean
+    //     (unflagged) AUTOMATIC match: the matcher can be confidently wrong with no good
+    //     register replacement, and the reviewer must be able to discard it. Only suppressed
+    //     once the segment is already marked missing.
+    if (!seg.street_missing) {
       const label = seg.street_resolved ? L_.discardMatch : L_.doesNotExist;
       actions.appendChild(mkBtn(label, "btn", async () => {
         await fetch(`/api/segments/${seg.id}`, {

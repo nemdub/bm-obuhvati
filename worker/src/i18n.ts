@@ -24,7 +24,7 @@ export const STRINGS = {
   reviewed: "Проверено",
   street: "Улица",
   streetUnresolved: "Улица није пронађена",
-  doesNotExist: "Улица не постоји",
+  doesNotExist: "Није нађено",
   discardMatch: "Одбаци",
   streetMissing: "Означено: не постоји",
   wholeStreet: "Цео обухват",
