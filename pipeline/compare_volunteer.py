@@ -41,7 +41,7 @@ import config
 
 OUT_DIR = config.ARTIFACTS_DIR / "volunteer-compare"
 MAPPING_CSV = OUT_DIR / "mapping.csv"
-VOLUNTEER_DIR = config.DATA_DIR / "volunteer-polygons"
+VOLUNTEER_DIR = config.VOLUNTEER_DATA_DIR
 R2_POLY_DIR = config.ARTIFACTS_DIR / "r2" / "polygons" / "m"
 STATION_BASE_MULT = 100_000  # station_id = int(muni_id) * STATION_BASE_MULT + station number
 

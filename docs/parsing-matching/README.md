@@ -46,6 +46,7 @@ rules must stay in lock‑step with stage04, which is why it gets its own docume
 | 8 | [08-worker-live-preview.md](08-worker-live-preview.md) | The Worker's TypeScript mirror of matching + override resolution | `worker/src/db.ts` |
 | 9 | [09-volunteer-mapping.md](09-volunteer-mapping.md) | Mapping volunteer GeoJSON files to register municipalities (filename heuristic, district splits, Palilula collision, child‑GO fold) and the geometry‑based comparison against automated polygons | `map_volunteer_polygons.py`, `compare_volunteer.py` |
 | 10 | [10-station-edits.md](10-station-edits.md) | Station‑level reviewer edits: fix raw source text (re‑parse), add a new station, remove one (tombstone); worker tables, the stage03c reconcile step, pristine snapshots for revert/restore | `stage03c_reconcile_edits.py`, `worker/src/index.ts` |
+| 11 | [11-volunteer-merge.md](11-volunteer-merge.md) | Standalone one‑off: cleanup/normalize the volunteer geojson + xlsx + kmz (+ data‑quality report), then combine volunteer‑primary / automated‑fallback into a separate export. NOT part of the pipeline or Worker | `clean_volunteer_data.py`, `combine_volunteer.py`, `fetch_prod_polygons.sh` |
 
 ## Conventions used in these docs
 

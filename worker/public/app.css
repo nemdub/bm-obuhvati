@@ -61,6 +61,7 @@ tr.section-head td { font-weight: 700; background: #eef2f6; color: var(--muted, 
 .badge.warn { background: #fff0e0; color: var(--warn); }
 .badge.ok { background: #e6f4ea; color: var(--ok); }
 .badge.amend { background: #ede7f6; color: #5e35b1; }
+.badge.area { background: #e0f2f1; color: #00695c; }
 .badge.dirty { background: #e3f2fd; color: var(--blue); }
 
 .detail { display: grid; grid-template-columns: 440px 1fr; gap: 16px; align-items: start; }

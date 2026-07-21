@@ -59,6 +59,35 @@ ADDED_STATION_BASE = 9_500_000_000_000  # synthetic station-id base (shared with
 
 SQLITE_OUT = ARTIFACTS_DIR / "bm.sqlite"
 
+# ── Volunteer combine (standalone one-off; see docs/parsing-matching/11-volunteer-merge.md) ──
+# NOT part of the main pipeline — a side tool that combines hand-drawn volunteer coverage polygons
+# with our automated ones into a separate export. The choice is WHOLE-MUNICIPALITY: each muni is
+# entirely volunteer OR entirely automatic (never mixed) — volunteer unless its file is mislocated or
+# covers too few of the muni's stations.
+VOLUNTEER_DATA_DIR = DATA_DIR / "volunteer-data"                 # geojson + xlsx + kmz (supersedes volunteer-polygons/)
+VOLUNTEER_COMBINE_DIR = ARTIFACTS_DIR / "volunteer-combined"     # intermediate artifacts + reports
+VOLUNTEER_NORMALIZED_DIR = VOLUNTEER_COMBINE_DIR / "normalized"  # normalized volunteer records, per polygon_muni_id
+VOLUNTEER_STATIONS_DIR = VOLUNTEER_COMBINE_DIR / "stations"      # volunteer STATION table (Broj BM -> priority/voters),
+                                                                 # polygon-independent, per polygon_muni_id
+VOLUNTEER_PROD_POLY_DIR = ARTIFACTS_DIR / "prod-r2" / "polygons" / "m"  # production automatic blobs (fetch_prod_polygons.sh)
+VOLUNTEER_COMBINED_OUT = DATA_DIR / "volunteer-combined"         # final combined geojson exports (for other projects)
+# Volunteer files known to be mislocated / bad source data (force automatic for the whole muni).
+# The file-level overlap guard (VOL_FILE_MIN_OVERLAP_FRAC) auto-detects these; this set is a manual
+# escape hatch for files the guard can't reach (e.g. no automatic polygons to overlap against).
+VOLUNTEER_UNUSABLE_FILES: set[str] = set()
+VOL_FILE_MIN_OVERLAP_FRAC = 0.05    # mislocation guard: a volunteer file whose drawn area overlaps the
+                                    # muni's automated union by < this fraction is dropped as mislocated.
+VOL_MUNI_MIN_COMPLETENESS = 0.70    # whole-muni decision: use volunteer only if its usable polygon count
+                                    # ≥ this fraction of the muni's automated station count, else automatic.
+VOL_NUMBER_SCHEME_MIN_MATCH = 0.50  # a geojson whose per-feature numbers exist but match the Excel/KMZ
+                                    # Broj BM set below this fraction uses a WRONG numbering scheme
+                                    # (e.g. Subotica writes the global RBR) → untrustworthy → automatic.
+# Attaching volunteer priority/voters to an automated polygon joins by Broj BM, but the 2023 volunteer
+# numbering has DRIFTED from the current register in many munis (a station inserted/removed shifts every
+# later number). Each join is therefore confirmed by comparing the ADDRESS; these tune that comparison.
+VOL_ADDR_JACCARD_MIN = 0.80         # token-set overlap that counts as the same address
+VOL_ADDR_FUZZ_MIN = 92              # rapidfuzz token_sort_ratio fallback for typos/abbreviations
+
 # ── Coordinate reference systems ────────────────────────────────────────────
 UTM_34N = 32634  # register native CRS (meters)
 WGS84 = 4326     # output CRS for mapping (lat/lon)

@@ -34,6 +34,41 @@ def _winners(assigned):
     return {aid: w["station_id"] for aid, w in assigned.items()}
 
 
+# ── Claim emission (_emit_claims) ────────────────────────────────────────────
+class TestEmitClaims:
+    def test_settlement_claim_ignores_house_numbers(self):
+        # A settlement-name claim with settlement-wide house numbers must emit a single
+        # sett_whole per target street, NOT per-street intervals/singles (which would hijack
+        # every street's houses at interval specificity — the "Вранеши 3-395" bug).
+        claims: dict = {}
+        parsed = {"whole": False, "intervals": [[3, 395, "odd"], [8, 406, "even"]],
+                  "singles": [[991, ""]], "bez_broja": False}
+        S4._emit_claims(claims, 1, 100, parsed, ["st_a", "st_b"], "sett_whole")
+        assert [c["kind"] for c in claims["st_a"]] == ["sett_whole"]
+        assert [c["kind"] for c in claims["st_b"]] == ["sett_whole"]
+
+    def test_plain_street_claim_still_emits_numbers(self):
+        # A normal (non-settlement) street claim is unchanged — numbers become interval/single.
+        claims: dict = {}
+        parsed = {"whole": False, "intervals": [[1, 10, "all"]], "singles": [[5, "А"]],
+                  "bez_broja": False}
+        S4._emit_claims(claims, 1, 100, parsed, ["st_a"], "whole")
+        assert sorted(c["kind"] for c in claims["st_a"]) == ["interval", "single"]
+
+    def test_settlement_claim_yields_to_explicit_street(self):
+        # End-to-end: a settlement claim carrying numbers (now sett_whole, spec -1) loses the
+        # street to another station's explicit whole-street claim (spec 0) — instead of winning
+        # it via a spurious interval. (Mirrors Вранеши КРАЉЕВАЧКА: #1 whole vs #2 "Вранеши N".)
+        claims: dict = {}
+        S4._emit_claims(claims, 10, 100, {"whole": True}, ["kr"], "whole")          # station 100 lists it
+        S4._emit_claims(claims, 20, 200,
+                        {"whole": False, "intervals": [[3, 395, "odd"]], "singles": []},
+                        ["kr"], "sett_whole")                                         # station 200 settlement claim
+        rows = [(1, 5, ""), (2, 7, ""), (3, 9, "")]
+        assigned, conflicts, _ = S4.resolve_street_claims(claims["kr"], rows)
+        assert set(_winners(assigned).values()) == {100} and conflicts == {}
+
+
 # ── Specificity ──────────────────────────────────────────────────────────────
 class TestSpecificity:
     def test_exact_single_beats_bare_implied(self):

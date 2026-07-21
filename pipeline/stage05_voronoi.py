@@ -129,6 +129,53 @@ def cells_for_settlement(xy: np.ndarray, station_ids: np.ndarray,
     return result
 
 
+def partition_settlement(naselje, xy: np.ndarray, sids: np.ndarray) -> dict[int, object]:
+    """Split a whole-settlement boundary among the stations that EACH claim the whole
+    settlement, so together they rebuild it without overlapping.
+
+    When two+ polling stations claim the same settlement but also list individual streets,
+    giving each the full naselje boundary makes their polygons overlap across the whole
+    village. Instead, partition the naselje by the stations' OWN coverage: a Voronoi over
+    their won addresses (`xy`/`sids`), each address's cell assigned to its station, unioned
+    per station and clipped to the naselje. Every point of the naselje goes to the station
+    whose nearest listed address is closest — including the streets neither listed explicitly
+    (they fall to the geographically nearest claimant). Returns {station_id: portion}."""
+    stations = np.unique(sids)
+    if len(stations) == 1:
+        return {int(stations[0]): naselje}
+    nx0, ny0, nx1, ny1 = naselje.bounds
+    radius = max(float(np.ptp(xy, axis=0).max()) * 2.0,
+                 float(np.hypot(nx1 - nx0, ny1 - ny0))) + 1000.0
+    cells_by_station: dict[int, list] = {}
+    if len(xy) >= 4:
+        try:
+            vor = Voronoi(xy)
+            regions, vertices = voronoi_finite_polygons_2d(vor, radius)
+            for i in range(len(xy)):
+                cells_by_station.setdefault(int(sids[i]), []).append(Polygon(vertices[regions[i]]))
+        except QhullError:
+            cells_by_station = {}
+    if not cells_by_station:
+        # Few / collinear seeds: fall back to shapely's Voronoi (handles n>=2), matching each
+        # cell to the seed it contains.
+        mp = MultiPoint([tuple(p) for p in xy])
+        try:
+            cells = list(shapely.voronoi_polygons(mp, extend_to=naselje.envelope).geoms)
+        except Exception:
+            return {}
+        for cell in cells:
+            for i in range(len(xy)):
+                if cell.intersects(Point(xy[i])):
+                    cells_by_station.setdefault(int(sids[i]), []).append(cell)
+                    break
+    out: dict[int, object] = {}
+    for sid, cells in cells_by_station.items():
+        region = unary_union(cells).buffer(0).intersection(naselje).buffer(0)
+        if not region.is_empty:
+            out[sid] = region
+    return out
+
+
 def to_wgs84(geom):
     return shp_transform(lambda xs, ys: _TO_WGS84.transform(xs, ys), geom)
 
@@ -257,6 +304,29 @@ def main() -> int:
         aff_df = df.filter(pl.col("station_id").is_in(list(affected)))
         affected_sett_ids = set(aff_df["settlement_id"].unique().to_list())
 
+    # Settlements claimed by 2+ stations are CONTESTED: rather than drawing the full naselje
+    # boundary for each (which overlaps their polygons across the whole village), the boundary
+    # is partitioned among them (see partition_settlement). Detected from the FULL claim set so
+    # a contested settlement is recognised even when only one claimant is in an incremental
+    # scope — and there, ALL its co-claimants are pulled into `affected` so the shared partition
+    # is recomputed consistently for every owner.
+    claimants_by_sett: dict[str, list[int]] = {}
+    if config.STATION_SETT_CLAIMS_PARQUET.exists():
+        _sc = pl.read_parquet(config.STATION_SETT_CLAIMS_PARQUET)
+        for s, sid in zip(_sc["settlement_id"].to_list(), _sc["station_id"].to_list()):
+            claimants_by_sett.setdefault(s, []).append(int(sid))
+    contested_setts = {s for s, sts in claimants_by_sett.items() if len(set(sts)) >= 2}
+    if affected is not None and contested_setts:
+        extra: set[int] = set()
+        for s in contested_setts:
+            cl = set(claimants_by_sett[s])
+            if cl & affected:
+                extra |= cl
+        if extra - affected:
+            affected |= extra
+            aff_df = df.filter(pl.col("station_id").is_in(list(affected)))
+            affected_sett_ids |= set(aff_df["settlement_id"].unique().to_list())
+
     boundaries = load_muni_boundaries()
     for g in boundaries.values():
         shapely.prepare(g)
@@ -327,17 +397,50 @@ def main() -> int:
     # Whole-settlement coverage: a station that claims a whole settlement gets the official
     # naselje boundary as its coverage polygon (unioned with any point-Voronoi cells it also
     # has), instead of the ragged point-cloud shape. Boundaries come from data/naselje.csv
-    # via stage01's settlement_geometry.parquet (UTM, same CRS as the cells).
+    # via stage01's settlement_geometry.parquet (UTM, same CRS as the cells). For a CONTESTED
+    # settlement (claimed by 2+ stations) the boundary is partitioned between the claimants by
+    # their own addresses, so together they rebuild the village without overlapping.
     claim_geom: dict[int, object] = {}
     if config.STATION_SETT_CLAIMS_PARQUET.exists():
         sc = pl.read_parquet(config.STATION_SETT_CLAIMS_PARQUET)
         if affected is not None:
             sc = sc.filter(pl.col("station_id").is_in(list(affected)))
-        sbound = load_settlement_boundaries(set(sc["settlement_id"].to_list()))
+        sbound = load_settlement_boundaries(set(sc["settlement_id"].to_list())
+                                            | contested_setts)
+        # Per contested settlement, the portion each claimant owns (Voronoi over its won
+        # addresses, clipped to the naselje). Built once from the FULL claimant set + full df.
+        partitions: dict[str, dict[int, object]] = {}
+        n_split = 0
+        for s in contested_setts:
+            nb = sbound.get(s)
+            if nb is None:
+                continue
+            seeds = df.filter((pl.col("settlement_id") == s)
+                              & pl.col("station_id").is_in(claimants_by_sett[s]))
+            if seeds.is_empty():
+                continue
+            partitions[s] = partition_settlement(
+                nb, np.column_stack([seeds["x"].to_numpy(), seeds["y"].to_numpy()]),
+                seeds["station_id"].to_numpy())
+            n_split += 1
+        if n_split:
+            print(f"  contested settlements split between stations: {n_split:,}")
         for (sid,), grp in sc.group_by("station_id"):
-            geoms = [sbound[s] for s in grp["settlement_id"].to_list() if s in sbound]
+            sid = int(sid)
+            geoms = []
+            for s in grp["settlement_id"].to_list():
+                if s in partitions:
+                    # Contested + splittable: only this claimant's share (None if it has no
+                    # addresses here, in which case it draws nothing and the co-claimant owns it).
+                    part = partitions[s].get(sid)
+                    if part is not None and not part.is_empty:
+                        geoms.append(part)
+                elif s in sbound:
+                    # Uncontested, or contested but unsplittable (no addresses to seed the
+                    # partition) — fall back to the full naselje boundary.
+                    geoms.append(sbound[s])
             if geoms:
-                claim_geom[int(sid)] = geoms[0] if len(geoms) == 1 else unary_union(geoms)
+                claim_geom[sid] = geoms[0] if len(geoms) == 1 else unary_union(geoms)
 
     # OSM-fallback coverage: a segment whose street/settlement the register can't place was
     # geocoded against OpenStreetMap in stage04 (data/osm_claims.parquet, UTM WKT, already

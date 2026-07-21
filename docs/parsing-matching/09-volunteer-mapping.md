@@ -1,9 +1,12 @@
 # Volunteer polygon mapping & comparison
 
 A set of volunteer‑drawn polling‑station coverage polygons lives in
-`data/volunteer-polygons/*.geojson`. They are an independent, hand‑drawn reference we use to
-**QA** our automated (Voronoi + review) polygons, and the seed of a future ingest path where a
-volunteer polygon could become the authoritative coverage for a station.
+`data/volunteer-data/*.geojson` (the newer drop; supersedes `data/volunteer-polygons/` and adds
+per‑municipality `*_biracka_mesta.xlsx` priority/voter tables and `*_lokacije.kmz` station points).
+They are an independent, hand‑drawn reference we use to **QA** our automated (Voronoi + review)
+polygons. The *combine* path that fuses them with our polygons into a separate export is documented
+in [11-volunteer-merge.md](11-volunteer-merge.md); this file covers only the filename→municipality
+mapping and the geometry comparison, both of which now read `data/volunteer-data/`.
 
 This document specifies (a) how a volunteer file is mapped to a register municipality despite
 inconsistent naming, and (b) how the two polygon sets are compared. Code:

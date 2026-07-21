@@ -30,7 +30,7 @@ import polars as pl
 import config
 from common.transliterate import nfc
 
-VOLUNTEER_DIR = config.DATA_DIR / "volunteer-polygons"
+VOLUNTEER_DIR = config.VOLUNTEER_DATA_DIR
 OUT_DIR = config.ARTIFACTS_DIR / "volunteer-compare"
 MAPPING_CSV = OUT_DIR / "mapping.csv"
 R2_POLY_DIR = config.ARTIFACTS_DIR / "r2" / "polygons" / "m"

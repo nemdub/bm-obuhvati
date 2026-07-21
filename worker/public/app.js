@@ -357,6 +357,9 @@
     head.innerHTML = `<span class="seg-title">${escapeHtml(title)}</span>`;
     if (seg.street_missing) head.innerHTML += `<span class="badge ok">${L_.streetMissing}</span>`;
     else if (!seg.street_resolved) head.innerHTML += `<span class="badge warn">${L_.streetUnresolved}</span>`;
+    // A whole-settlement claim covers EVERY street of the settlement — mark it so the reviewer
+    // sees which segment draws the whole-settlement polygon (the title is just the place name).
+    if (seg.whole_settlement) head.innerHTML += `<span class="badge area">${L_.settlementArea}</span>`;
     if (seg.source === "amendment") head.innerHTML += `<span class="badge amend">${L_.amendment}</span>`;
     if (seg.needs_review) head.innerHTML += `<span class="badge warn">${L_.needsReview}</span>`;
     if (seg.manual_locked) head.innerHTML += `<span class="badge ok">✎</span>`;

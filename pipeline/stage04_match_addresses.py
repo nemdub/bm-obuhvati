@@ -467,6 +467,17 @@ def _emit_claims(claims_by_street: dict[str, list[dict]], seg_id: int, station_i
     """Append a segment's parsed claims (whole / intervals / singles / bez_broja) to
     `claims_by_street` for each target register street. Shared by the pass-1 claim build,
     the reviewer-added claims, and the proximity pass."""
+    # A settlement-name claim (`sett_whole`) covers the WHOLE settlement. Any house numbers on
+    # it ("Вранеши 3-395, 8-406, 991") are SETTLEMENT-WIDE numbering that does NOT map to the
+    # register's per-street numbering — applying them as per-street intervals lets the claim
+    # hijack every street's houses at interval specificity (spec 1), beating other stations'
+    # legitimate whole-street claims (spec 0). So emit a single sett_whole claim per target
+    # (spec -1, yields to any street-level claim) and ignore the numbers entirely.
+    if whole_kind == "sett_whole":
+        for tid in targets:
+            claims_by_street.setdefault(tid, []).append(
+                {"seg_id": seg_id, "station_id": station_id, "kind": "sett_whole"})
+        return
     for tid in targets:
         if parsed.get("whole"):
             claims_by_street.setdefault(tid, []).append(

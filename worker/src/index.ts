@@ -66,6 +66,9 @@ app.get("/api/s/:id/segments", async (c) => {
             : s.street_name_cyr ? tr(s.street_name_cyr, script) : null,
         street_resolved: !streetMissing && !!(s.ov_street_id ?? s.street_id),
         street_missing: streetMissing,
+        // Whole-settlement (village-name) claim: covers EVERY street of the settlement, so the
+        // client marks it distinctly — otherwise it looks like an ordinary whole-street segment.
+        whole_settlement: settlementClaim,
         manual_street: !!s.ov_street_id && !streetMissing,
         manual_street_id: streetMissing ? null : s.ov_street_id,
         kind: s.kind,
