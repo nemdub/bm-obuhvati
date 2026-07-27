@@ -48,6 +48,10 @@ export const STRINGS = {
   polygonsBuilt: "Израђени полигони",
   noPointsForStreet: "Нема повезаних адреса за ову улицу",
   noPolygon: "Нема полигона",
+  // Before/after polygon-iteration toggle on the maps.
+  iteration: "Полигони",
+  iterCurrent: "Тренутни",
+  iterSimplified: "Поједностављени",
   none: "нема",
   changeStreet: "Промени улицу",
   searchStreet: "Тражи улицу или насеље у регистру…",

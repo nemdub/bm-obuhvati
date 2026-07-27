@@ -15,6 +15,40 @@
   ];
   const color = (n) => PALETTE[((n % PALETTE.length) + PALETTE.length) % PALETTE.length];
 
+  // A small top-right control to switch the polygon iteration (current live shapes vs a
+  // candidate simplification). The choice is persisted in localStorage so it carries across
+  // the muni overview and station pages. Calls onChange(variant) immediately, then on click.
+  function addIterationToggle(L, map, labels, onChange) {
+    const KEY = "bm-poly-variant";
+    const VARIANTS = ["current", "candidate"];
+    let variant = localStorage.getItem(KEY);
+    if (VARIANTS.indexOf(variant) < 0) variant = "current";
+    const Ctl = L.Control.extend({
+      options: { position: "topright" },
+      onAdd() {
+        const div = L.DomUtil.create("div", "iter-toggle leaflet-bar");
+        div.innerHTML =
+          `<span class="iter-label">${labels.iteration || "Polygons"}</span>` +
+          `<button type="button" data-v="current">${labels.iterCurrent || "Current"}</button>` +
+          `<button type="button" data-v="candidate">${labels.iterSimplified || "Simplified"}</button>`;
+        L.DomEvent.disableClickPropagation(div);
+        const btns = div.querySelectorAll("button");
+        const sync = () => btns.forEach((b) => b.classList.toggle("active", b.dataset.v === variant));
+        btns.forEach((b) => b.addEventListener("click", () => {
+          if (b.dataset.v === variant) return;
+          variant = b.dataset.v;
+          localStorage.setItem(KEY, variant);
+          sync();
+          onChange(variant);
+        }));
+        sync();
+        return div;
+      },
+    });
+    map.addControl(new Ctl());
+    onChange(variant); // initial draw with the persisted/default variant
+  }
+
   // "+ Add station": reveal the form, POST a new (reviewer-added) station, open its page.
   const addBtn = document.getElementById("add-station-btn");
   const addForm = document.getElementById("add-station-form");
@@ -81,30 +115,45 @@
     applySort(); // default: number ascending
   }
 
-  fetch(`/api/m/${cfg.muniId}/polygons.geojson`)
-    .then((r) => r.json())
-    .then((fc) => {
-      let boundaryLayer = null;
-      if (fc.boundaries && fc.boundaries.length) {
-        boundaryLayer = L.geoJSON(
-          { type: "FeatureCollection", features: fc.boundaries.map((g) => ({ type: "Feature", geometry: g })) },
-          { style: { color: "#616161", weight: 1.5, dashArray: "6 4", fill: false }, interactive: false }
-        ).addTo(map);
-      }
-      const layer = L.geoJSON(fc, {
-        style: (f) => ({ color: color(f.properties.number), weight: 1, fillOpacity: 0.25, fillColor: color(f.properties.number) }),
-        onEachFeature: (f, l) => {
-          l.bindTooltip(
-            `#${f.properties.number} · ${f.properties.name}` +
-            (f.properties.address ? `<br><span class="tt-addr">${f.properties.address}</span>` : "")
-          );
-          l.on("mouseover", () => l.setStyle({ weight: 3, fillOpacity: 0.45 }));
-          l.on("mouseout", () => l.setStyle({ weight: 1, fillOpacity: 0.25 }));
-          l.on("click", () => { window.location.href = `/s/${f.properties.station_id}`; });
-        },
-      }).addTo(map);
-      const b = layer.getBounds();
-      if (boundaryLayer) b.extend(boundaryLayer.getBounds());
-      if (b.isValid()) map.fitBounds(b, { padding: [20, 20] });
-    });
+  // Before/after polygon-iteration toggle: the same map view can render the live shapes
+  // ("current") or a candidate simplification ("candidate"), fetched from the ?v= variant.
+  let polyLayer = null;
+  let boundaryLayer = null;
+  let firstLoad = true;
+  const loadPolygons = (variant) => {
+    fetch(`/api/m/${cfg.muniId}/polygons.geojson?v=${variant}`)
+      .then((r) => r.json())
+      .then((fc) => {
+        if (polyLayer) map.removeLayer(polyLayer);
+        if (boundaryLayer) map.removeLayer(boundaryLayer);
+        boundaryLayer = null;
+        if (fc.boundaries && fc.boundaries.length) {
+          boundaryLayer = L.geoJSON(
+            { type: "FeatureCollection", features: fc.boundaries.map((g) => ({ type: "Feature", geometry: g })) },
+            { style: { color: "#616161", weight: 1.5, dashArray: "6 4", fill: false }, interactive: false }
+          ).addTo(map);
+        }
+        polyLayer = L.geoJSON(fc, {
+          style: (f) => ({ color: color(f.properties.number), weight: 1, fillOpacity: 0.25, fillColor: color(f.properties.number) }),
+          onEachFeature: (f, l) => {
+            l.bindTooltip(
+              `#${f.properties.number} · ${f.properties.name}` +
+              (f.properties.address ? `<br><span class="tt-addr">${f.properties.address}</span>` : "")
+            );
+            l.on("mouseover", () => l.setStyle({ weight: 3, fillOpacity: 0.45 }));
+            l.on("mouseout", () => l.setStyle({ weight: 1, fillOpacity: 0.25 }));
+            l.on("click", () => { window.location.href = `/s/${f.properties.station_id}`; });
+          },
+        }).addTo(map);
+        // Fit only on the first load, so toggling keeps the current viewport.
+        if (firstLoad) {
+          firstLoad = false;
+          const b = polyLayer.getBounds();
+          if (boundaryLayer) b.extend(boundaryLayer.getBounds());
+          if (b.isValid()) map.fitBounds(b, { padding: [20, 20] });
+        }
+      });
+  };
+
+  addIterationToggle(L, map, cfg.labels || {}, loadPolygons);
 })();

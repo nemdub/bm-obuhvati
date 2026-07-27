@@ -98,8 +98,15 @@ SIMPLIFY_TOL_M = 5.0        # polygon simplification tolerance (meters)
 # Each station polygon is clipped to this buffer around its OWN addresses, so it hugs the
 # listed addresses instead of sprawling across empty land out to the settlement hull.
 # Large enough to bridge addresses across a street / along a block, small enough to trim
-# parks and edges.
+# parks and edges. Used for the outlier-address caps and the <4-point fallback.
 POLYGON_CLIP_BUFFER_M = 180.0
+# Cap radius for the OUTLIER / FALLBACK coverage in stage05's territory fill. The main path
+# gives each station its full Voronoi territory within the naselje boundary (no cap). This cap
+# only applies to the edge cases: an address that sits OUTSIDE its naselje boundary keeps a
+# tight capped Voronoi cell instead (so it isn't dropped), and tiny/degenerate settlements with
+# no usable Voronoi fall back to buffered points. Kept equal to the hug buffer. The halo bucket
+# size tracks this value so it stays self-consistent.
+POLYGON_CELL_CAP_M = POLYGON_CLIP_BUFFER_M
 # Morphological-close radius applied to each merged station polygon before simplification.
 # The per-cell octagons touch through pinch points, so unary_union threads needle-thin
 # zero-width slits into the boundary that render as spikes shooting toward the centre
@@ -107,6 +114,10 @@ POLYGON_CLIP_BUFFER_M = 180.0
 # buffer's rounding, so the net polygon has FEWER vertices and is valid. Keep well under the
 # smallest real coverage feature so it never bridges distinct parts or fills real concavities.
 POLYGON_DESPIKE_M = 3.0
+# Interior rings (holes) below this area (m^2) are dropped as clutter — the tiny gaps the
+# per-cell octagons leave when they don't perfectly tile a village. Larger holes are kept:
+# they are genuine enclaves covered by a neighbouring station, and filling them would overlap.
+POLYGON_MIN_HOLE_M2 = 5000.0
 BOUNDARY_SIMPLIFY_TOL_M = 20.0  # simplification of municipality boundaries for the UI overlay
 
 # ── Matching tuning ─────────────────────────────────────────────────────────

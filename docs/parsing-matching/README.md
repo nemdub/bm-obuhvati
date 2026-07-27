@@ -22,7 +22,7 @@ amendment docs ──stage03b──▶ segments_amended (surgical prose ops appl
                               │
 segments + register ──stage04──▶ segments (final) + links  (MATCHING)
                               │
-links + addresses ──stage05──▶ polygons (Voronoi; geometry, not covered here)
+links + addresses ──stage05──▶ polygons (Voronoi; geometry — see doc 12)
                               │
 everything ──stage06──▶ D1 SQLite + R2 blobs
 ```
@@ -47,6 +47,7 @@ rules must stay in lock‑step with stage04, which is why it gets its own docume
 | 9 | [09-volunteer-mapping.md](09-volunteer-mapping.md) | Mapping volunteer GeoJSON files to register municipalities (filename heuristic, district splits, Palilula collision, child‑GO fold) and the geometry‑based comparison against automated polygons | `map_volunteer_polygons.py`, `compare_volunteer.py` |
 | 10 | [10-station-edits.md](10-station-edits.md) | Station‑level reviewer edits: fix raw source text (re‑parse), add a new station, remove one (tombstone); worker tables, the stage03c reconcile step, pristine snapshots for revert/restore | `stage03c_reconcile_edits.py`, `worker/src/index.ts` |
 | 11 | [11-volunteer-merge.md](11-volunteer-merge.md) | Standalone one‑off: cleanup/normalize the volunteer geojson + xlsx + kmz (+ data‑quality report), then combine volunteer‑primary / automated‑fallback into a separate export. NOT part of the pipeline or Worker | `clean_volunteer_data.py`, `combine_volunteer.py`, `fetch_prod_polygons.sh` |
+| 12 | [12-polygon-geometry.md](12-polygon-geometry.md) | Geometry stage: per‑station Voronoi territory clipped to the naselje boundary (contiguous non‑overlapping shapes, with halo + outlier safeguards) → muni clip → despike → overlap‑safe small‑hole removal → adaptive simplify; the non‑overlap invariant; the before/after map iteration toggle | `stage05_voronoi.py`, `sync_r2.sh`, `worker/src/db.ts` |
 
 ## Conventions used in these docs
 

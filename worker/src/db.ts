@@ -370,11 +370,24 @@ export interface PolyRow {
   osm?: string | null;
 }
 
-/** Read a municipality's polygon blob from R2 (polygons/m/<muniId>.json). Polygons are
+/** R2 key prefixes for the polygon iterations the map can switch between. "current" is the
+ *  live shapes; "candidate" is an under-review iteration published to a parallel prefix (see
+ *  sync_r2.sh R2_KEY_PREFIX), so before/after can be compared without disturbing production. */
+const POLY_PREFIX: Record<string, string> = { current: "polygons", candidate: "polygons-v2" };
+export type PolyVariant = keyof typeof POLY_PREFIX;
+
+/** Normalize an untrusted ?v= value to a known variant (unknown -> "current"). */
+export function polyVariant(v: string | undefined | null): PolyVariant {
+  return v && v in POLY_PREFIX ? (v as PolyVariant) : "current";
+}
+
+/** Read a municipality's polygon blob from R2 (<prefix>/m/<muniId>.json). Polygons are
  *  static between recomputes and byte-heavy, so they live in object storage, not D1.
  *  Returns the stations array (pipeline-sorted by number) or [] if the blob is absent. */
-export async function muniPolyRows(bucket: R2Bucket, muniId: string): Promise<PolyRow[]> {
-  const obj = await bucket.get(`polygons/m/${muniId}.json`);
+export async function muniPolyRows(
+  bucket: R2Bucket, muniId: string, variant: PolyVariant = "current"
+): Promise<PolyRow[]> {
+  const obj = await bucket.get(`${POLY_PREFIX[variant]}/m/${muniId}.json`);
   if (!obj) return [];
   const data = await obj.json<{ stations: PolyRow[] }>();
   return data.stations ?? [];
@@ -540,8 +553,10 @@ export async function streetLinesForStation(db: D1Database, stationId: number) {
 }
 
 /** All of a municipality's station polygons (for the overview map and exports). */
-export async function allMuniPolygons(bucket: R2Bucket, muniId: string): Promise<PolyRow[]> {
-  return muniPolyRows(bucket, muniId);
+export async function allMuniPolygons(
+  bucket: R2Bucket, muniId: string, variant: PolyVariant = "current"
+): Promise<PolyRow[]> {
+  return muniPolyRows(bucket, muniId, variant);
 }
 
 /** Search register streets AND settlements within a station's municipality, for the

@@ -14,13 +14,18 @@
 #
 # Usage: sync_r2.sh [bucket]
 #   env: R2_RETRIES (default 4), R2_FORCE=1 (ignore manifest, upload everything)
+#        R2_KEY_PREFIX (default "polygons") — the object-key prefix to write under. Set to
+#          e.g. "polygons-v2" to publish a CANDIDATE iteration alongside the live "polygons/"
+#          blobs (the Worker's ?v=candidate variant reads it) without touching production.
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BUCKET="${1:-bm-obuhvati-polygons}"
 RETRIES="${R2_RETRIES:-4}"
+PREFIX="${R2_KEY_PREFIX:-polygons}"
 SRC="$DIR/artifacts/r2"
-MANIFEST="$SRC/.uploaded.sha256"
-NEW_MANIFEST="$SRC/.uploaded.sha256.new"
+# Per-prefix manifest so the candidate and live prefixes don't share a change-diff.
+MANIFEST="$SRC/.uploaded.${PREFIX}.sha256"
+NEW_MANIFEST="$SRC/.uploaded.${PREFIX}.sha256.new"
 [ -d "$SRC/polygons" ] || { echo "sync_r2: no $SRC/polygons (run stage06 first)" >&2; exit 2; }
 cd "$DIR/../worker"
 
@@ -52,12 +57,12 @@ put() {  # key file
 : > "$NEW_MANIFEST"
 
 # summary.json: always upload (counts change most runs); kept out of the manifest.
-put "polygons/summary.json" "$SRC/polygons/summary.json"
+put "$PREFIX/summary.json" "$SRC/polygons/summary.json"
 
 n=0        # uploaded (changed) this run
 skipped=0  # unchanged, skipped
 for f in "$SRC"/polygons/m/*.json; do
-  key="polygons/m/$(basename "$f")"
+  key="$PREFIX/m/$(basename "$f")"
   h="$(sha "$f")"
   if [ "$h" = "$(old_sha "$key")" ]; then
     skipped=$((skipped + 1))
@@ -72,4 +77,4 @@ done
 
 # Clean pass -> commit the manifest so the next run can diff against it.
 mv "$NEW_MANIFEST" "$MANIFEST"
-echo "   r2 sync complete -> $BUCKET ($n uploaded, $skipped unchanged + summary)"
+echo "   r2 sync complete -> $BUCKET/$PREFIX ($n uploaded, $skipped unchanged + summary)"

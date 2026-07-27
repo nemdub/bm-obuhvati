@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """Stage 05 — build per-station coverage polygons via Voronoi tessellation.
 
-Partitions addresses by settlement, computes a Voronoi diagram over the settlement's
-points in UTM (meters), clips cells to the settlement's buffered convex hull, and unions
-the cells belonging to each station. Unmatched points get an "unassigned" sentinel so
+Partitions addresses by settlement, computes a Voronoi diagram over the settlement's points in
+UTM (meters), and gives each station its FULL Voronoi territory within the settlement: the
+station's cells are unioned and clipped to the official naselje boundary. Voronoi cells tile
+space, so the per-station regions are disjoint and NEVER overlap another station (the project's
+one-address-one-station invariant), while filling the village into contiguous simple shapes
+instead of many tiny per-address circles. Unmatched points get an "unassigned" sentinel so
 coverage gaps remain visible. A station spanning settlements is unioned across them.
-Output polygons are reprojected to WGS84 GeoJSON.
+
+After the union + despike, small interior holes are dropped (``drop_small_holes``) for cleaner
+volunteer hand-editing — but a hole is KEPT when it is large OR when it encloses another
+station's matched address, so filling it can never make this polygon cover a foreign address.
+Output is reprojected to WGS84 GeoJSON.
 
   reads:  addresses.parquet, links.parquet, station_settlement_claims.parquet, osm_claims.parquet
   writes: polygons.parquet (station_id, geojson, area_m2, point_count, computed_at)
@@ -33,7 +40,7 @@ import polars as pl
 import shapely
 from pyproj import Transformer
 from scipy.spatial import Voronoi, QhullError
-from shapely.geometry import MultiPoint, Point, Polygon, mapping
+from shapely.geometry import MultiPoint, MultiPolygon, Point, Polygon, mapping
 from shapely.ops import transform as shp_transform, unary_union
 
 import config
@@ -82,42 +89,114 @@ def voronoi_finite_polygons_2d(vor: Voronoi, radius: float) -> tuple[list[list[i
     return new_regions, np.asarray(new_vertices)
 
 
-def _buffered_by_station(xy: np.ndarray, station_ids: np.ndarray, result: dict[int, list[Polygon]]) -> None:
-    """Fallback for tiny/degenerate settlements: each station = its points buffered."""
+def _buffered_by_station(xy: np.ndarray, station_ids: np.ndarray, result: dict[int, list[Polygon]],
+                         boundary=None) -> None:
+    """Fallback for tiny/degenerate settlements (<4 points or a Qhull failure).
+
+    With a settlement `boundary` the few points split it (so the station(s) fill the village
+    without overlapping): a lone station gets the whole boundary, otherwise a shapely Voronoi
+    over the points partitions it. Without a boundary each station is just its buffered points."""
+    if boundary is not None and not boundary.is_empty and len(xy):
+        stations = np.unique(station_ids)
+        if len(stations) == 1:
+            result.setdefault(int(stations[0]), []).append(boundary)
+            return
+        try:
+            mp = MultiPoint([tuple(p) for p in xy])
+            cells = list(shapely.voronoi_polygons(mp, extend_to=boundary.envelope).geoms)
+            shapely.prepare(boundary)
+            for cell in cells:
+                for i in range(len(xy)):
+                    if cell.intersects(Point(xy[i])):
+                        part = cell.intersection(boundary)
+                        if not part.is_empty:
+                            result.setdefault(int(station_ids[i]), []).append(part)
+                        break
+            return
+        except Exception:
+            pass  # fall through to plain buffers
     for sid in np.unique(station_ids):
         pts = MultiPoint([tuple(p) for p in xy[station_ids == sid]])
-        result.setdefault(int(sid), []).append(pts.buffer(config.POLYGON_CLIP_BUFFER_M, quad_segs=2))
+        result.setdefault(int(sid), []).append(pts.buffer(config.POLYGON_CELL_CAP_M, quad_segs=2))
 
 
 def cells_for_settlement(xy: np.ndarray, station_ids: np.ndarray,
-                         halo_xy: np.ndarray | None = None) -> dict[int, list[Polygon]]:
-    """Return {station_id: [cell polygons]} for one settlement (UTM coords).
+                         halo_xy: np.ndarray | None = None, boundary=None) -> dict[int, list[Polygon]]:
+    """Return {station_id: [region polygons]} for one settlement (UTM coords).
 
-    `halo_xy` are nearby points from NEIGHBORING settlements: they participate in the
-    tessellation purely as boundary constraints (their cells are discarded), so a cell at
-    the settlement edge cannot grow across the boundary into a neighbor's streets — the
-    per-settlement partition is otherwise blind to them (e.g. a Zvezdara station's cells
-    sprawled into Vračar across Bulevar kralja Aleksandra).
+    With a settlement `boundary` (the official naselje polygon), each station is given its FULL
+    Voronoi territory within the settlement: the station's Voronoi cells are unioned and clipped
+    to the boundary. Because Voronoi cells tile space, the per-station regions are disjoint and
+    together fill the settlement — contiguous simple shapes (few parts) that NEVER overlap
+    another station. The boundary bounds the growth to the village (over-covering empty land
+    inside it, not sprawling muni-wide). `halo_xy` (foreign points from OTHER settlements that
+    fall within this boundary's bbox) still participates as Voronoi constraints — its cells are
+    discarded — so where two naselje boundaries overlap, a territory stops at the bisector before
+    reaching a neighbouring station's address rather than covering it.
 
-    Each cell is capped to a buffer around ITS OWN generating point, so the polygon hugs
-    the addresses instead of sprawling out to the settlement edge. Capping per cell
-    (cell ∩ one small octagon) stays cheap."""
+    Without a boundary (should not happen — naselje geometry covers 100% of address settlements —
+    but kept as a defensive fallback) it reverts to the older behaviour: each cell capped to an
+    octagon around its own point, with `halo_xy` constraining edge cells."""
     result: dict[int, list[Polygon]] = {}
 
-    # Voronoi needs >=4 non-collinear points; otherwise fall back to buffered points.
+    # Voronoi needs >=4 non-collinear points; otherwise fall back to buffered/split points.
     if len(xy) < 4:
-        _buffered_by_station(xy, station_ids, result)
+        _buffered_by_station(xy, station_ids, result, boundary)
         return result
 
-    n_own = len(xy)
+    use_boundary = boundary is not None and not boundary.is_empty
     pts = np.vstack([xy, halo_xy]) if halo_xy is not None and len(halo_xy) else xy
     try:
         vor = Voronoi(pts)
     except QhullError:
-        _buffered_by_station(xy, station_ids, result)
+        _buffered_by_station(xy, station_ids, result, boundary)
         return result
 
-    R = config.POLYGON_CLIP_BUFFER_M
+    n_own = len(xy)
+    if use_boundary:
+        # Territory fill: union each OWN station's Voronoi cells (halo cells i>=n_own are
+        # constraints only — discarded), then clip to the settlement boundary ONCE per station
+        # (cheap vs per-cell). Interior unions sit inside the boundary (a prepared `contains`
+        # check skips the intersection); only edge territories are actually clipped.
+        radius = float(np.ptp(pts, axis=0).max()) * 2 + 1000.0
+        regions, vertices = voronoi_finite_polygons_2d(vor, radius)
+        shapely.prepare(boundary)
+        # Split own points by whether they fall inside the naselje boundary. In-boundary cells
+        # fill the settlement (clipped to it); the ~0.15% of addresses OUTSIDE their boundary
+        # (register coords vs boundary source disagree) keep their tight Voronoi cell (cell ∩
+        # cap) instead — a raw cap there isn't Voronoi-constrained and would overlap neighbours.
+        # Every piece is a subset of that address's Voronoi cell, so the partition never overlaps
+        # and no listed address loses coverage.
+        inside = shapely.contains(boundary, shapely.points(xy[:, 0], xy[:, 1]))
+        by_in: dict[int, list[Polygon]] = {}
+        by_out: dict[int, list[Polygon]] = {}
+        for i in range(n_own):
+            sid = int(station_ids[i])
+            cell = Polygon(vertices[regions[i]])
+            if inside[i]:
+                by_in.setdefault(sid, []).append(cell)
+            else:
+                cap = Point(xy[i]).buffer(config.POLYGON_CELL_CAP_M, quad_segs=2)
+                piece = cell.intersection(cap)
+                if not piece.is_empty:
+                    by_out.setdefault(sid, []).append(piece)
+        for sid in set(by_in) | set(by_out):
+            geoms: list[Polygon] = []
+            ins = by_in.get(sid)
+            if ins:
+                terr = unary_union(ins)
+                if not boundary.contains(terr):
+                    terr = terr.intersection(boundary)
+                if not terr.is_empty:
+                    geoms.append(terr)
+            geoms.extend(by_out.get(sid, ()))
+            if geoms:
+                result.setdefault(sid, []).append(
+                    geoms[0] if len(geoms) == 1 else unary_union(geoms)
+                )
+        return result
+
+    R = config.POLYGON_CELL_CAP_M
     radius = float(np.ptp(pts, axis=0).max()) * 2 + R
     regions, vertices = voronoi_finite_polygons_2d(vor, radius)
     for i in range(n_own):  # halo cells (i >= n_own) are constraints only — discarded
@@ -178,6 +257,37 @@ def partition_settlement(naselje, xy: np.ndarray, sids: np.ndarray) -> dict[int,
 
 def to_wgs84(geom):
     return shp_transform(lambda xs, ys: _TO_WGS84.transform(xs, ys), geom)
+
+
+def _parts(geom) -> list:
+    """The Polygon members of a (Multi)Polygon; [] for empty/other geometries."""
+    if geom.is_empty:
+        return []
+    return list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
+
+
+def drop_small_holes(geom, min_hole_area: float, keep_ring=None):
+    """Remove interior rings smaller than ``min_hole_area`` (m^2), keeping larger ones.
+
+    The per-cell octagons don't tile perfectly, so unioning a village's addresses leaves many
+    tiny interior gaps that clutter the shape for hand-editing. Two kinds of hole must be KEPT:
+    (1) large holes — genuine enclaves covered by a neighbouring station; (2) any hole for which
+    ``keep_ring(ring_polygon)`` is truthy — the caller uses this to preserve a hole that encloses
+    ANOTHER station's address (filling it would make this polygon cover a foreign address, which
+    breaks the one-address-one-station invariant). A pure tiling gap encloses no address and is
+    dropped."""
+    def fix(p: Polygon) -> Polygon:
+        keep = [
+            r for r in p.interiors
+            if Polygon(r).area >= min_hole_area or (keep_ring is not None and keep_ring(Polygon(r)))
+        ]
+        return Polygon(p.exterior, keep) if len(keep) != len(p.interiors) else p
+
+    parts = _parts(geom)
+    if not parts:
+        return geom
+    fixed = [fix(p) for p in parts]
+    return fixed[0] if len(fixed) == 1 and geom.geom_type == "Polygon" else MultiPolygon(fixed)
 
 
 def _osm_foreign_overlap(geom, sid, X, Y, sids_all, buckets, B) -> tuple[int, int]:
@@ -335,11 +445,13 @@ def main() -> int:
     clip_geoms = station_clip_geoms(aff_df if affected is not None else df, boundaries)
 
     # Global arrays + coarse spatial grid for halo lookup. Bucket size >= the cell cap, so
-    # own-bucket + 8 neighbors covers every foreign point a boundary cell could touch.
+    # own-bucket + 8 neighbors covers every foreign point a boundary cell could touch — MUST
+    # track POLYGON_CELL_CAP_M (a cap larger than the bucket would let cells overshoot the halo
+    # constraints and spill across settlement boundaries into neighbours' addresses).
     X = df["x"].to_numpy()
     Y = df["y"].to_numpy()
     sett_codes, SETT = np.unique(df["settlement_id"].to_numpy(), return_inverse=True)
-    B = max(256.0, config.POLYGON_CLIP_BUFFER_M)
+    B = max(256.0, config.POLYGON_CELL_CAP_M)
     bx = np.floor(X / B).astype(np.int64)
     by = np.floor(Y / B).astype(np.int64)
     bucket_of = bx * 10_000_019 + by
@@ -347,9 +459,21 @@ def main() -> int:
     for i, k in enumerate(bucket_of):
         buckets.setdefault(int(k), []).append(i)
 
+    # Spatial index over ALL points, used to gather the halo (foreign points within a
+    # settlement's boundary bbox) that constrains territory cells so they don't cross into a
+    # neighbouring settlement's addresses where naselje boundaries overlap.
+    pt_tree = shapely.STRtree(shapely.points(X, Y))
+
     idx_by_sett: dict[int, np.ndarray] = {
         int(c): np.flatnonzero(SETT == c) for c in range(len(sett_codes))
     }
+
+    # Official settlement (naselje) boundaries. Each station's Voronoi cells are clipped to its
+    # settlement's boundary so it fills its FULL territory within the village (contiguous, few
+    # parts) without overlapping neighbours (Voronoi tiles) or sprawling muni-wide. 100% of
+    # address settlements have a boundary; the rare miss falls back to the octagon cap + halo.
+    # Loaded once and reused for the whole-settlement claim geometry below.
+    sett_boundaries = load_settlement_boundaries()
 
     # Accumulate cells per station across settlements.
     station_cells: dict[int, list] = {}
@@ -366,10 +490,30 @@ def main() -> int:
         n_compute += 1
         xy = np.column_stack([X[own_idx], Y[own_idx]])
         sids = sids_all[own_idx]
+        boundary = sett_boundaries.get(str(sett_codes[code]))
 
-        # Halo: foreign points in own buckets + their 8 neighbors (boundary constraints).
+        # Halo = foreign (other-settlement) points that constrain this settlement's edge cells so
+        # a territory can't cross the Voronoi bisector into a neighbour's addresses. In boundary
+        # mode gather every foreign point within the boundary's bbox (naselje boundaries can
+        # overlap, so the constraint must cover the whole settlement extent, not just 8 buckets).
+        # In the no-boundary fallback use the cheaper own-bucket + 8-neighbour gather.
         halo_xy = None
-        if len(own_idx) >= 4:
+        if boundary is not None:
+            # Query region = the boundary bbox UNIONed with the own-points bbox, expanded by the
+            # cap. The own-points span matters because ~0.15% of addresses sit outside the
+            # boundary; their outlier caps must also be constrained by nearby foreign points.
+            bx0, by0, bx1, by1 = boundary.bounds
+            m = config.POLYGON_CELL_CAP_M
+            qbox = shapely.box(
+                min(bx0, float(xy[:, 0].min())) - m, min(by0, float(xy[:, 1].min())) - m,
+                max(bx1, float(xy[:, 0].max())) + m, max(by1, float(xy[:, 1].max())) + m,
+            )
+            cand_arr = pt_tree.query(qbox)
+            if len(cand_arr):
+                foreign = cand_arr[SETT[cand_arr] != code]
+                if len(foreign):
+                    halo_xy = np.column_stack([X[foreign], Y[foreign]])
+        elif len(own_idx) >= 4:
             cand: list[int] = []
             seen: set[int] = set()
             for b in {(int(bx[i]), int(by[i])) for i in own_idx}:
@@ -384,7 +528,7 @@ def main() -> int:
             if len(foreign):
                 halo_xy = np.column_stack([X[foreign], Y[foreign]])
 
-        for sid, cells in cells_for_settlement(xy, sids, halo_xy).items():
+        for sid, cells in cells_for_settlement(xy, sids, halo_xy, boundary).items():
             if sid == UNASSIGNED:
                 continue
             # Defensive: in scoped mode only ever touch affected stations' polygons, so a
@@ -405,8 +549,7 @@ def main() -> int:
         sc = pl.read_parquet(config.STATION_SETT_CLAIMS_PARQUET)
         if affected is not None:
             sc = sc.filter(pl.col("station_id").is_in(list(affected)))
-        sbound = load_settlement_boundaries(set(sc["settlement_id"].to_list())
-                                            | contested_setts)
+        sbound = sett_boundaries  # reuse the boundaries already loaded for cell clipping
         # Per contested settlement, the portion each claimant owns (Voronoi over its won
         # addresses, clipped to the naselje). Built once from the FULL claimant set + full df.
         partitions: dict[str, dict[int, object]] = {}
@@ -511,8 +654,7 @@ def main() -> int:
         # invalid. A morphological close-then-open (dilate, erode past, dilate back) heals both
         # kinds and repairs validity; the simplify pass below removes the rounding so the result
         # has fewer vertices, not more. Radius stays well under the smallest real coverage
-        # feature (>=180m octagons), so it never bridges parts or fills real concavities
-        # (area change ~0.05%).
+        # feature, so it never bridges distinct parts or fills real concavities.
         r = config.POLYGON_DESPIKE_M
         smoothed = (
             merged.buffer(r, quad_segs=2)
@@ -521,12 +663,28 @@ def main() -> int:
         )
         if not smoothed.is_empty:
             merged = smoothed
+        # Drop tiny interior holes (the gaps the per-cell octagons leave when they don't tile a
+        # village perfectly) so volunteers get clean shapes. A hole is KEPT if it is large (a
+        # genuine enclave) OR it encloses ANOTHER station's matched address — filling the latter
+        # would make this polygon cover a foreign address, breaking one-address-one-station. The
+        # foreign check reuses the coarse point grid (`_osm_foreign_overlap` returns (own, other)).
+        merged = drop_small_holes(
+            merged.buffer(0), config.POLYGON_MIN_HOLE_M2,
+            keep_ring=lambda ring: _osm_foreign_overlap(ring, sid, X, Y, sids_all, buckets, B)[1] > 0,
+        )
         area = merged.area  # m^2 (UTM)
         # Adaptive simplification: whole-village polygons can exceed the D1 statement
-        # budget (~50KB); escalate tolerance until the GeoJSON fits.
+        # budget (~50KB); escalate tolerance until the GeoJSON fits. Simplify + the nonlinear
+        # UTM->WGS84 reprojection can leave a self-intersection near the many-holed boundaries
+        # the generalize step produces, so the reprojected geometry is validity-repaired (a
+        # buffer(0) is topology-only, CRS-agnostic) — keeping the output 100% OGC-valid.
         gj = None
         for tol in (config.SIMPLIFY_TOL_M, 15, 40, 100, 250):
             wgs = to_wgs84(merged.simplify(tol, preserve_topology=True))
+            if not wgs.is_valid:
+                repaired = wgs.buffer(0)
+                if not repaired.is_empty:
+                    wgs = repaired
             gj = json.dumps(mapping(wgs), ensure_ascii=False)
             if len(gj.encode()) <= 45_000:
                 break
