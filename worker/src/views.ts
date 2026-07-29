@@ -190,7 +190,6 @@ export function stationsView(
       </table>
       <script id="cfg" type="application/json">${raw(JSON.stringify({
         muniId: muni.id,
-        labels: { iteration: t("iteration"), iterCurrent: t("iterCurrent"), iterSimplified: t("iterSimplified") },
       }))}</script>
       <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
       <script src="/muni.js"></script>`
@@ -274,6 +273,5 @@ function labelBundle(script: Script) {
     removeStation: t("removeStation"), removeStationConfirm: t("removeStationConfirm"),
     restoreStation: t("restoreStation"), stationRemoved: t("stationRemoved"),
     deleteStation: t("deleteStation"), addedStation: t("addedStation"),
-    iteration: t("iteration"), iterCurrent: t("iterCurrent"), iterSimplified: t("iterSimplified"),
   };
 }

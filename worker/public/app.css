@@ -169,12 +169,3 @@ tr.removed-row td .badge { text-decoration: none; }
 
 @media (max-width: 900px) { .detail { grid-template-columns: 1fr; } .mapwrap { position: static; } #map { height: 60vh; } }
 
-/* Before/after polygon-iteration toggle (top-right map control). */
-.iter-toggle { display: flex; align-items: center; gap: 2px; padding: 3px 4px; background: #fff;
-  border-radius: 6px; font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
-.iter-toggle .iter-label { color: var(--muted); padding: 0 5px; text-transform: uppercase;
-  letter-spacing: .03em; font-size: 10px; }
-.iter-toggle button { border: 1px solid var(--line); background: #fafbfc; color: var(--ink);
-  padding: 3px 8px; border-radius: 5px; cursor: pointer; font-size: 12px; line-height: 1.2; }
-.iter-toggle button:hover { background: #eef2f6; }
-.iter-toggle button.active { background: var(--blue); border-color: var(--blue); color: #fff; }

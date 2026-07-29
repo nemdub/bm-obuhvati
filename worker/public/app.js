@@ -15,40 +15,6 @@
   let pointsLayer = null, polygonLayer = null, neighborsLayer = null, boundaryLayer = null, streetLinesLayer = null, osmLayer = null;
   let highlightSeg = null;
 
-  // A small top-right control to switch the polygon iteration (current live shapes vs a
-  // candidate simplification). The choice is persisted in localStorage so it carries across
-  // the muni overview and station pages. Calls onChange(variant) immediately, then on click.
-  function addIterationToggle(L, map, labels, onChange) {
-    const KEY = "bm-poly-variant";
-    const VARIANTS = ["current", "candidate"];
-    let variant = localStorage.getItem(KEY);
-    if (VARIANTS.indexOf(variant) < 0) variant = "current";
-    const Ctl = L.Control.extend({
-      options: { position: "topright" },
-      onAdd() {
-        const div = L.DomUtil.create("div", "iter-toggle leaflet-bar");
-        div.innerHTML =
-          `<span class="iter-label">${labels.iteration || "Polygons"}</span>` +
-          `<button type="button" data-v="current">${labels.iterCurrent || "Current"}</button>` +
-          `<button type="button" data-v="candidate">${labels.iterSimplified || "Simplified"}</button>`;
-        L.DomEvent.disableClickPropagation(div);
-        const btns = div.querySelectorAll("button");
-        const sync = () => btns.forEach((b) => b.classList.toggle("active", b.dataset.v === variant));
-        btns.forEach((b) => b.addEventListener("click", () => {
-          if (b.dataset.v === variant) return;
-          variant = b.dataset.v;
-          localStorage.setItem(KEY, variant);
-          sync();
-          onChange(variant);
-        }));
-        sync();
-        return div;
-      },
-    });
-    map.addControl(new Ctl());
-    onChange(variant); // initial draw with the persisted/default variant
-  }
-
   function pointStyle(f) {
     const p = f.properties;
     let color = "#2e7d32"; // confident
@@ -125,13 +91,11 @@
     }
   }
 
-  // The polygon (and its neighbours / boundaries / OSM shapes / meta) come from the muni blob
-  // at the selected iteration prefix, so they reload on the before/after toggle. Points and
-  // street lines are variant-independent and load once in loadMap.
+  // The polygon (and its neighbours / boundaries / OSM shapes / meta) come from the muni blob;
+  // points and street lines load separately in loadMap.
   let pointsFittable = false;
-  let firstPolyLoad = true;
-  async function reloadPolygon(variant) {
-    const poly = await fetch(api(`/polygon.geojson?v=${variant}`)).then((r) => r.json());
+  async function reloadPolygon() {
+    const poly = await fetch(api("/polygon.geojson")).then((r) => r.json());
 
     if (boundaryLayer) map.removeLayer(boundaryLayer);
     boundaryLayer = L.geoJSON({ type: "FeatureCollection", features: (poly.boundaries || []).map((g) => ({ type: "Feature", geometry: g })) },
@@ -162,12 +126,8 @@
       meta.textContent = L_.noPolygon;
     }
 
-    // Fit to the polygon only on the first load and only when there were no points to fit to,
-    // so toggling iterations never moves the reviewer's viewport.
-    if (firstPolyLoad) {
-      firstPolyLoad = false;
-      if (!pointsFittable && polygonLayer) map.fitBounds(polygonLayer.getBounds(), { padding: [30, 30] });
-    }
+    // Fit to the polygon only when there were no points/street lines to fit to.
+    if (!pointsFittable && polygonLayer) map.fitBounds(polygonLayer.getBounds(), { padding: [30, 30] });
   }
 
   async function loadMap() {
@@ -190,9 +150,8 @@
     else if (streetLinesLayer && streetLinesLayer.getBounds().isValid())
       map.fitBounds(streetLinesLayer.getBounds(), { padding: [30, 30] });
 
-    // Add the iteration toggle; its immediate call performs the first polygon load (fitting to
-    // the polygon here only if there were no points/street lines above).
-    addIterationToggle(L, map, L_, reloadPolygon);
+    // Draw the polygon (fitting to it only if there were no points/street lines above).
+    await reloadPolygon();
   }
 
   function refreshPoints() {

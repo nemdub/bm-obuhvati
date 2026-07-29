@@ -114,10 +114,28 @@ POLYGON_CELL_CAP_M = POLYGON_CLIP_BUFFER_M
 # buffer's rounding, so the net polygon has FEWER vertices and is valid. Keep well under the
 # smallest real coverage feature so it never bridges distinct parts or fills real concavities.
 POLYGON_DESPIKE_M = 3.0
-# Interior rings (holes) below this area (m^2) are dropped as clutter — the tiny gaps the
-# per-cell octagons leave when they don't perfectly tile a village. Larger holes are kept:
-# they are genuine enclaves covered by a neighbouring station, and filling them would overlap.
-POLYGON_MIN_HOLE_M2 = 5000.0
+# Interior rings (holes) are CLOSED unless another polling station claims the enclosed land —
+# a hole is clutter for the volunteer editors, and land nobody covers belongs to the station
+# that surrounds it. A hole is kept (not filled) when ANY of these hold:
+#   * it encloses another station's matched address (filling it would break one-address-one-
+#     station), or
+#   * another station's polygon covers at least POLYGON_HOLE_CLAIM_FRAC of it (and more than
+#     POLYGON_HOLE_CLAIM_M2, so despike fuzz along a shared border doesn't count as a claim) —
+#     catches address-less coverage (whole-settlement / OSM claims), or
+#   * at least POLYGON_HOLE_FOREIGN_SETT_FRAC of it lies in a settlement this station has NO
+#     coverage in — an unassigned village enclosed by a rural station's territory is a matching
+#     gap for somebody else to fill, not this station's land.
+POLYGON_HOLE_CLAIM_FRAC = 0.02
+POLYGON_HOLE_CLAIM_M2 = 50.0
+POLYGON_HOLE_FOREIGN_SETT_FRAC = 0.20
+# ...and only for a ring big enough to plausibly BE somebody's village. Naselje borders are
+# lined with tiny slivers the tessellation leaves behind; without this floor every one of them
+# reads as "another settlement's land" and survives as a speck of a hole.
+POLYGON_HOLE_FOREIGN_SETT_M2 = 1_000.0
+# Unclaimed land smaller than this (m^2) is not worth handing to anybody: the settlement
+# tessellation leaves a huge number of sub-metre slivers along shared naselje borders, they are
+# invisible on the map, and routing each one costs more than the land is worth.
+POLYGON_MIN_FILL_PIECE_M2 = 25.0
 BOUNDARY_SIMPLIFY_TOL_M = 20.0  # simplification of municipality boundaries for the UI overlay
 
 # ── Matching tuning ─────────────────────────────────────────────────────────

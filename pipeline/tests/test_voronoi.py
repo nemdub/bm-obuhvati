@@ -6,8 +6,10 @@ settlement without overlapping (the fix for two stations both drawing the whole 
 """
 
 import numpy as np
+import shapely
 from shapely.geometry import MultiPolygon, Point, Polygon
 
+import config
 import stage05_voronoi as s5
 
 
@@ -54,47 +56,169 @@ class TestPartitionSettlement:
         assert abs(parts[1].union(parts[2]).area - naselje.area) < 1.0
 
 
-class TestDropSmallHoles:
+class TestCloseUnclaimedHoles:
     def _with_hole(self, hole_half):
         # A 1000x1000 square with one centred square hole of half-width `hole_half`.
         return Polygon(_square(1000).exterior.coords, [_ring(500, 500, hole_half)])
 
-    def test_small_hole_removed(self):
-        poly = self._with_hole(20)            # hole area 40*40 = 1600 m^2
-        out = s5.drop_small_holes(poly, 5000.0)
-        assert len(out.interiors) == 0
-        assert out.area == 1_000_000          # filled hole -> full square
+    def test_unclaimed_hole_closed_whatever_its_size(self):
+        # Size is no longer a reason to keep a hole: both a tiling gap (1600 m^2) and a big
+        # unmatched-street cell (160 000 m^2) are closed when nobody else claims them.
+        for half, area in ((20, 1_600), (200, 160_000)):
+            poly = self._with_hole(half)
+            assert Polygon(_ring(500, 500, half)).area == area
+            out = s5.close_unclaimed_holes(poly, keep_ring=lambda r: False)
+            assert len(out.interiors) == 0
+            assert out.area == 1_000_000      # filled hole -> full square
 
-    def test_large_hole_preserved(self):
-        poly = self._with_hole(60)            # hole area 120*120 = 14400 m^2 >= 5000
-        out = s5.drop_small_holes(poly, 5000.0)
+    def test_claimed_hole_kept(self):
+        # A hole another station covers stays open — filling it would swallow foreign land.
+        poly = self._with_hole(200)
+        out = s5.close_unclaimed_holes(poly, keep_ring=lambda r: r.contains(Point(500, 500)))
         assert len(out.interiors) == 1
         assert out.area == poly.area
 
     def test_multipolygon_each_part_cleaned(self):
-        a = Polygon(_square(1000).exterior.coords, [_ring(500, 500, 20)])            # small hole
+        a = Polygon(_square(1000).exterior.coords, [_ring(500, 500, 20)])
         b = Polygon([(2000, 0), (3000, 0), (3000, 1000), (2000, 1000)],
-                    [_ring(2500, 500, 60)])                                          # large hole
-        out = s5.drop_small_holes(MultiPolygon([a, b]), 5000.0)
+                    [_ring(2500, 500, 60)])
+        # Only part b's hole is claimed (it contains the foreign point).
+        out = s5.close_unclaimed_holes(MultiPolygon([a, b]),
+                                       keep_ring=lambda r: r.contains(Point(2500, 500)))
         assert out.geom_type == "MultiPolygon"
-        holes = [len(p.interiors) for p in out.geoms]
-        assert sorted(holes) == [0, 1]        # small dropped, large kept
+        assert sorted(len(p.interiors) for p in out.geoms) == [0, 1]
 
     def test_no_holes_unchanged(self):
         poly = _square(1000)
-        out = s5.drop_small_holes(poly, 5000.0)
+        out = s5.close_unclaimed_holes(poly, keep_ring=lambda r: False)
         assert out.equals(poly)
 
-    def test_small_hole_with_foreign_address_kept(self):
-        # A small hole (1600 m^2) that encloses another station's address must be KEPT even
-        # though it's below the area threshold — filling it would cover a foreign address.
-        poly = self._with_hole(20)
-        # keep_ring true for a ring that contains the foreign point (500, 500).
-        out = s5.drop_small_holes(poly, 5000.0, keep_ring=lambda r: r.contains(Point(500, 500)))
-        assert len(out.interiors) == 1
-        # A tiling gap elsewhere (no foreign point) is still dropped.
-        out2 = s5.drop_small_holes(poly, 5000.0, keep_ring=lambda r: r.contains(Point(9_999, 9_999)))
-        assert len(out2.interiors) == 0
+    def test_no_predicate_closes_everything(self):
+        out = s5.close_unclaimed_holes(self._with_hole(200))
+        assert len(out.interiors) == 0
+
+
+class TestHoleIsClaimed:
+    AREA = 100_000.0
+
+    def test_foreign_address_claims(self):
+        assert s5.hole_is_claimed(self.AREA, 1, 0.0, 0.0)
+
+    def test_empty_hole_is_free(self):
+        assert not s5.hole_is_claimed(self.AREA, 0, 0.0, 0.0)
+
+    def test_foreign_polygon_claims_material_share(self):
+        frac = config.POLYGON_HOLE_CLAIM_FRAC
+        assert s5.hole_is_claimed(self.AREA, 0, self.AREA * frac * 2, 0.0)
+        # A sliver below the share is despike fuzz along a shared border, not a claim.
+        assert not s5.hole_is_claimed(self.AREA, 0, self.AREA * frac / 2, 0.0)
+
+    def test_foreign_polygon_needs_absolute_floor_too(self):
+        # On a small hole the relative share alone is met by a few m^2 of border fuzz; the
+        # absolute floor is what rejects it.
+        small = 1_000.0
+        fuzz = config.POLYGON_HOLE_CLAIM_M2 * 0.8   # > 2% of 1000 m^2, but under the floor
+        assert fuzz > config.POLYGON_HOLE_CLAIM_FRAC * small
+        assert not s5.hole_is_claimed(small, 0, fuzz, 0.0)
+        # Genuinely covered by a neighbour (the whole small hole) -> claimed.
+        assert s5.hole_is_claimed(small, 0, small, 0.0)
+
+    def test_foreign_settlement_claims(self):
+        frac = config.POLYGON_HOLE_FOREIGN_SETT_FRAC
+        # A village this station has no coverage in (all its addresses unmatched, so neither
+        # the address nor the polygon check sees anything) must stay open.
+        assert s5.hole_is_claimed(self.AREA, 0, 0.0, self.AREA * frac * 2)
+        # Clipping the edge of a neighbouring naselje is not a claim.
+        assert not s5.hole_is_claimed(self.AREA, 0, 0.0, self.AREA * frac / 2)
+
+    def test_foreign_settlement_needs_a_village_sized_ring(self):
+        # A sliver on a naselje border lies ENTIRELY in the next settlement, but it is far too
+        # small to be anyone's village — it gets closed like any other speck.
+        sliver = config.POLYGON_HOLE_FOREIGN_SETT_M2 / 10
+        assert not s5.hole_is_claimed(sliver, 0, 0.0, sliver)
+        big = config.POLYGON_HOLE_FOREIGN_SETT_M2 * 10
+        assert s5.hole_is_claimed(big, 0, 0.0, big)
+
+
+class TestResidualShares:
+    """The unclaimed land left between independently-tessellated settlements is split by
+    nearest matched address, so the shares tile it without ever reaching a foreign address."""
+
+    def test_splits_residual_by_nearest_address(self):
+        # Residual strip spanning x in [0,1000]; station 10's address sits left, 20's right.
+        residual = Polygon([(0, 0), (1000, 0), (1000, 100), (0, 100)])
+        xy = np.array([(100, 50), (100, 60), (900, 50), (900, 60)], dtype=float)
+        sids = np.array([10, 10, 20, 20])
+        shares = s5.residual_shares(residual, xy, sids)
+        assert set(shares) == {10, 20}
+        a, b = shares[10], shares[20]
+        assert a.intersection(b).area < 1.0                      # disjoint
+        assert abs(a.union(b).area - residual.area) < 1.0        # tiles the residual
+        assert a.centroid.x < 500 < b.centroid.x                 # each on its own side
+
+    def test_empty_residual_yields_nothing(self):
+        xy = np.array([(0, 0), (0, 10), (10, 0), (10, 10)], dtype=float)
+        assert s5.residual_shares(Polygon(), xy, np.array([1, 1, 1, 1])) == {}
+
+    def test_too_few_seeds_yields_nothing(self):
+        # Under 4 points Voronoi is degenerate; the caller keeps the land unclaimed.
+        assert s5.residual_shares(_square(100), np.array([(1.0, 1.0)]), np.array([7])) == {}
+
+
+class TestAttachOwner:
+    """A piece of unclaimed land is only useful to a polygon it MERGES with — otherwise it
+    would just become another island, which is what the fill exists to avoid."""
+
+    def _setup(self):
+        # Station 1's polygon on the left, station 2's on the right, a gap in between.
+        left = Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])
+        right = Polygon([(200, 0), (300, 0), (300, 100), (200, 100)])
+        return shapely.STRtree([left, right]), [left, right], [1, 2]
+
+    def test_prefers_the_voronoi_owner_when_it_adjoins(self):
+        tree, geoms, ids = self._setup()
+        piece = Polygon([(100, 0), (150, 0), (150, 100), (100, 100)])  # touches station 1
+        assert s5.attach_owner(piece, 1, tree, geoms, ids) == 1
+
+    def test_reassigns_to_the_adjoining_neighbour(self):
+        tree, geoms, ids = self._setup()
+        # Nearest address says station 1, but the piece only borders station 2's polygon.
+        piece = Polygon([(150, 0), (200, 0), (200, 100), (150, 100)])
+        assert s5.attach_owner(piece, 1, tree, geoms, ids) == 2
+
+    def test_longest_shared_border_wins(self):
+        tree, geoms, ids = self._setup()
+        # Spans the gap: 100 m of border with station 1, 20 m with station 2.
+        piece = Polygon([(100, 0), (200, 0), (200, 20), (100, 100)])
+        assert s5.attach_owner(piece, 99, tree, geoms, ids) == 1
+
+    def test_orphan_piece_is_left_unclaimed(self):
+        tree, geoms, ids = self._setup()
+        piece = Polygon([(120, 200), (180, 200), (180, 260), (120, 260)])  # touches nothing
+        assert s5.attach_owner(piece, 1, tree, geoms, ids) is None
+
+    def test_point_contact_does_not_merge(self):
+        tree, geoms, ids = self._setup()
+        # Meets station 1's polygon at the single corner (100,100) — unioning would still
+        # leave two islands, so this is not an attachment.
+        piece = Polygon([(100, 100), (150, 100), (150, 150)])
+        assert s5.attach_owner(piece, 1, tree, geoms, ids) is None
+
+
+class TestCoveredArea:
+    def test_counts_overlapping_geometries_once(self):
+        ring = _square(100)                                  # 10 000 m^2
+        a = Polygon([(0, 0), (60, 0), (60, 100), (0, 100)])  # left 60%
+        b = Polygon([(40, 0), (100, 0), (100, 100), (40, 100)])  # right 60%, overlaps a
+        tree = shapely.STRtree([a, b])
+        got = s5._covered_area(ring, tree, [a, b], ["x", "y"], skip=lambda k: False)
+        assert got == 10_000                                 # union covers the ring exactly once
+
+    def test_skipped_keys_ignored(self):
+        ring = _square(100)
+        a = _square(100)
+        tree = shapely.STRtree([a])
+        assert s5._covered_area(ring, tree, [a], ["mine"], skip=lambda k: k == "mine") == 0.0
 
 
 class TestCellCapNonOverlap:

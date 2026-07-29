@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Stage 05 — build per-station coverage polygons via Voronoi tessellation.
 
-Partitions addresses by settlement, computes a Voronoi diagram over the settlement's points in
-UTM (meters), and gives each station its FULL Voronoi territory within the settlement: the
-station's cells are unioned and clipped to the official naselje boundary. Voronoi cells tile
+Partitions addresses by settlement, computes a Voronoi diagram over the settlement's MATCHED
+points in UTM (meters), and gives each station its FULL Voronoi territory within the settlement:
+the station's cells are unioned and clipped to the official naselje boundary. Voronoi cells tile
 space, so the per-station regions are disjoint and NEVER overlap another station (the project's
 one-address-one-station invariant), while filling the village into contiguous simple shapes
-instead of many tiny per-address circles. Unmatched points get an "unassigned" sentinel so
-coverage gaps remain visible. A station spanning settlements is unioned across them.
+instead of many tiny per-address circles. A station spanning settlements is unioned across them.
 
-After the union + despike, small interior holes are dropped (``drop_small_holes``) for cleaner
-volunteer hand-editing — but a hole is KEPT when it is large OR when it encloses another
-station's matched address, so filling it can never make this polygon cover a foreign address.
+Land still unclaimed after that — settlements are tessellated independently, so whatever inside
+naselje A is nearer an address in naselje B is dropped by both — is then split between the
+municipality's stations by nearest matched address (`residual_shares`), each piece going to a
+polygon it actually merges with (`attach_owner`). That closes the corridors which cut a village
+station into islands and grows every polygon out to the municipality boundary.
+
+After the union + despike, interior holes are CLOSED (``close_unclaimed_holes``) for cleaner
+volunteer hand-editing — unless another station claims the enclosed land (``hole_is_claimed``:
+a foreign matched address inside, a foreign polygon covering it, or a settlement this station
+has no coverage in), so filling can never cover a foreign address or overlap a neighbour.
 Output is reprojected to WGS84 GeoJSON.
 
   reads:  addresses.parquet, links.parquet, station_settlement_claims.parquet, osm_claims.parquet
@@ -33,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from datetime import datetime, timezone
 
 import numpy as np
@@ -40,7 +47,7 @@ import polars as pl
 import shapely
 from pyproj import Transformer
 from scipy.spatial import Voronoi, QhullError
-from shapely.geometry import MultiPoint, MultiPolygon, Point, Polygon, mapping
+from shapely.geometry import MultiPoint, MultiPolygon, Point, Polygon, mapping, shape
 from shapely.ops import transform as shp_transform, unary_union
 
 import config
@@ -48,6 +55,7 @@ from common.boundaries import load_muni_boundaries, load_settlement_boundaries
 
 UNASSIGNED = -1
 _TO_WGS84 = Transformer.from_crs(config.UTM_34N, config.WGS84, always_xy=True)
+_TO_UTM = Transformer.from_crs(config.WGS84, config.UTM_34N, always_xy=True)
 
 
 def voronoi_finite_polygons_2d(vor: Voronoi, radius: float) -> tuple[list[list[int]], np.ndarray]:
@@ -255,8 +263,134 @@ def partition_settlement(naselje, xy: np.ndarray, sids: np.ndarray) -> dict[int,
     return out
 
 
+def residual_shares(residual, xy: np.ndarray, sids: np.ndarray) -> dict[int, object]:
+    """Split a municipality's UNCLAIMED land between its stations by nearest matched address.
+
+    {station_id: geometry}. `residual` is the part of the municipality no station's polygon
+    covers; `xy`/`sids` are the municipality's matched addresses and their owners. A Voronoi over
+    those addresses assigns every point of the residual to the station owning the address nearest
+    to it, so the shares tile the residual and — the invariant again — a share can never contain
+    another station's matched address, because each Voronoi cell holds exactly one address.
+
+    Why any residual exists at all: settlements are tessellated INDEPENDENTLY and each is clipped
+    to its own naselje boundary, so land inside naselje A that happens to be nearer an address in
+    naselje B is dropped by both (A never claims it, B's cell is clipped away). It shows up as the
+    empty corridors that cut a village station into islands and the bays along the municipality
+    edge. Filling it is what grows a polygon out to the municipality boundary."""
+    # Sub-metre slivers along shared naselje borders dominate the part count and are invisible
+    # on the map; dropping them up front is what keeps this pass affordable.
+    parts = [p for p in _parts(residual) if p.area >= config.POLYGON_MIN_FILL_PIECE_M2]
+    if not parts or len(xy) < 4:
+        return {}
+    try:
+        vor = Voronoi(xy)
+    except QhullError:
+        return {}
+    radius = float(np.ptp(xy, axis=0).max()) * 2 + 1000.0
+    regions, vertices = voronoi_finite_polygons_2d(vor, radius)
+    # Degenerate regions (co-located addresses) are skipped, so keep the owner alongside the cell.
+    cells: list[Polygon] = []
+    owners: list[int] = []
+    for i, region in enumerate(regions):
+        if len(region) < 3:
+            continue
+        cell = Polygon(vertices[region])
+        if cell.is_empty:
+            continue
+        cells.append(cell)
+        owners.append(int(sids[i]))
+    if not cells:
+        return {}
+
+    # Union each station's cells BEFORE clipping to the residual. (A ∪ B) ∩ R == (A ∩ R) ∪ (B ∩ R),
+    # so the result is identical — but it turns tens of thousands of cell×residual intersections
+    # into a few dozen region×residual ones. Doing it per cell made single municipalities take
+    # minutes (70645: 460 s).
+    cells_by_station: dict[int, list] = {}
+    for cell, sid in zip(cells, owners):
+        cells_by_station.setdefault(sid, []).append(cell)
+
+    tree = shapely.STRtree(parts)
+    out: dict[int, object] = {}
+    for sid, own_cells in cells_by_station.items():
+        region = own_cells[0] if len(own_cells) == 1 else unary_union(own_cells)
+        got: list[Polygon] = []
+        for k in tree.query(region, predicate="intersects"):
+            try:
+                piece = region.intersection(parts[k])
+            except Exception:  # pragma: no cover - defensive against GEOS edge cases
+                continue
+            # An intersection can come back as a collection with edge-contact lines; keep areas.
+            for p in getattr(piece, "geoms", [piece]):
+                if p.geom_type == "Polygon" and not p.is_empty:
+                    got.append(p)
+        if got:
+            out[sid] = got[0] if len(got) == 1 else unary_union(got)
+    return out
+
+
+def attach_owner(piece: Polygon, preferred: int, tree, geoms: list, ids: list) -> int | None:
+    """Which station should absorb this piece of unclaimed land — or None to leave it alone.
+
+    `preferred` is the Voronoi owner (the station with the nearest matched address). A piece is
+    only useful to a station whose polygon it MERGES with: one that merely lands nearby becomes
+    yet another island, which is the opposite of what the fill is for. So the piece goes to
+    `preferred` when it shares a border with that station's polygon, otherwise to the adjoining
+    station with the longest shared border, and nowhere if it adjoins nothing.
+
+    Reassigning is address-safe: a piece is a subset of ONE Voronoi cell, so the only matched
+    address it can contain is that cell's own — `preferred`'s. Callers therefore only reassign
+    pieces that contain no matched address at all, which leaves the invariant untouched."""
+    best_sid: int | None = None
+    best_len = 0.0
+    for k in tree.query(piece, predicate="intersects"):
+        try:
+            shared = piece.intersection(geoms[k])
+        except Exception:  # pragma: no cover - defensive against GEOS edge cases
+            continue
+        length = shared.length
+        if length <= 0:
+            continue  # touching at a single point doesn't merge
+        if ids[k] == preferred:
+            return preferred
+        if length > best_len:
+            best_sid, best_len = ids[k], length
+    return best_sid
+
+
 def to_wgs84(geom):
     return shp_transform(lambda xs, ys: _TO_WGS84.transform(xs, ys), geom)
+
+
+def to_utm(geom):
+    return shp_transform(lambda xs, ys: _TO_UTM.transform(xs, ys), geom)
+
+
+def previous_polygons(exclude: set[int]) -> tuple[list[int], list]:
+    """(station_ids, UTM geometries) of the already-published polygons of stations NOT in
+    ``exclude`` — read back from polygons.parquet and reprojected.
+
+    Only used in incremental (`--municipalities`) mode: the hole-closing pass must see every
+    station that could own a hole, and a neighbour outside the recompute scope is only on disk.
+    Without it a hole would be filled merely because its owner wasn't recomputed."""
+    if not config.POLYGONS_PARQUET.exists():
+        return [], []
+    prev = pl.read_parquet(config.POLYGONS_PARQUET).filter(
+        ~pl.col("station_id").is_in(list(exclude))
+    )
+    ids: list[int] = []
+    geoms: list = []
+    for sid, gj in zip(prev["station_id"].to_list(), prev["geojson"].to_list()):
+        if not gj:
+            continue
+        try:
+            g = shapely.make_valid(to_utm(shape(json.loads(gj))))
+        except Exception:
+            continue
+        if not g.is_empty:
+            ids.append(int(sid))
+            geoms.append(g)
+    return ids, geoms
 
 
 def _parts(geom) -> list:
@@ -266,21 +400,21 @@ def _parts(geom) -> list:
     return list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
 
 
-def drop_small_holes(geom, min_hole_area: float, keep_ring=None):
-    """Remove interior rings smaller than ``min_hole_area`` (m^2), keeping larger ones.
+def close_unclaimed_holes(geom, keep_ring=None):
+    """Close every interior ring except the ones ``keep_ring(ring_polygon)`` marks as claimed.
 
-    The per-cell octagons don't tile perfectly, so unioning a village's addresses leaves many
-    tiny interior gaps that clutter the shape for hand-editing. Two kinds of hole must be KEPT:
-    (1) large holes — genuine enclaves covered by a neighbouring station; (2) any hole for which
-    ``keep_ring(ring_polygon)`` is truthy — the caller uses this to preserve a hole that encloses
-    ANOTHER station's address (filling it would make this polygon cover a foreign address, which
-    breaks the one-address-one-station invariant). A pure tiling gap encloses no address and is
-    dropped."""
+    A station's territory is riddled with holes: the tiny gaps the cells leave where they don't
+    tile perfectly, and — much larger — the discarded Voronoi cells of UNASSIGNED addresses (a
+    street we failed to match punches its whole cell out of the surrounding station). Both are
+    clutter for the volunteer editors, and land no other station covers belongs to the station
+    that surrounds it, so the default is to fill.
+
+    ``keep_ring`` is the whole safety story (see `hole_is_claimed` for the criteria the caller
+    applies): filling a ring another station covers would break the one-address-one-station
+    invariant or create polygon overlap. Dropping an unclaimed ring only adds land nobody else
+    has, so it is overlap-neutral by construction."""
     def fix(p: Polygon) -> Polygon:
-        keep = [
-            r for r in p.interiors
-            if Polygon(r).area >= min_hole_area or (keep_ring is not None and keep_ring(Polygon(r)))
-        ]
+        keep = [r for r in p.interiors if keep_ring is not None and keep_ring(Polygon(r))]
         return Polygon(p.exterior, keep) if len(keep) != len(p.interiors) else p
 
     parts = _parts(geom)
@@ -288,6 +422,41 @@ def drop_small_holes(geom, min_hole_area: float, keep_ring=None):
         return geom
     fixed = [fix(p) for p in parts]
     return fixed[0] if len(fixed) == 1 and geom.geom_type == "Polygon" else MultiPolygon(fixed)
+
+
+def hole_is_claimed(ring_area: float, foreign_addresses: int,
+                    foreign_polygon_area: float, foreign_settlement_area: float) -> bool:
+    """Does another polling station own the land inside this hole? (see `config` for the
+    thresholds). Three independent claims, any of which keeps the hole open:
+
+    1. it encloses another station's MATCHED ADDRESS — filling it would cover a foreign address;
+    2. another station's POLYGON covers a material share of it — address-less coverage
+       (whole-settlement or OSM claims) is real coverage too, and filling would overlap it. The
+       absolute floor keeps despike fuzz along a shared border from reading as a claim;
+    3. a material share of a big enough ring lies in a SETTLEMENT this station has no coverage
+       in — a village nobody was matched to (its addresses are all unassigned, so 1. and 2. see
+       nothing) is a matching gap that belongs to whichever station RIK actually listed it for.
+       The area floor matters: naselje borders are lined with slivers that lie in the next
+       settlement by definition, and without it every one of them survives as a speck."""
+    if foreign_addresses > 0:
+        return True
+    if (foreign_polygon_area > config.POLYGON_HOLE_CLAIM_FRAC * ring_area
+            and foreign_polygon_area > config.POLYGON_HOLE_CLAIM_M2):
+        return True
+    return (ring_area >= config.POLYGON_HOLE_FOREIGN_SETT_M2
+            and foreign_settlement_area > config.POLYGON_HOLE_FOREIGN_SETT_FRAC * ring_area)
+
+
+def _covered_area(ring: Polygon, tree, geoms: list, keys: list, skip) -> float:
+    """Area of ``ring`` covered by the indexed geometries whose key ``skip(key)`` rejects.
+    Overlapping members are counted once (they are unioned first)."""
+    hits = [geoms[k] for k in tree.query(ring, predicate="intersects") if not skip(keys[k])]
+    if not hits:
+        return 0.0
+    try:
+        return unary_union(hits).intersection(ring).area
+    except Exception:  # pragma: no cover - defensive against GEOS edge cases
+        return 0.0
 
 
 def _osm_foreign_overlap(geom, sid, X, Y, sids_all, buckets, B) -> tuple[int, int]:
@@ -459,13 +628,27 @@ def main() -> int:
     for i, k in enumerate(bucket_of):
         buckets.setdefault(int(k), []).append(i)
 
-    # Spatial index over ALL points, used to gather the halo (foreign points within a
+    # Only MATCHED addresses seed the tessellation. An UNMATCHED address (its street didn't
+    # resolve) used to seed a Voronoi cell that was then discarded, punching that whole cell out
+    # of the station around it — which is exactly where the "unclaimed" land came from: the gaps
+    # that split a village station into islands, the bays along its edge, and most of the holes
+    # (Subotica: 267 of the municipality's 1 007 km² belonged to nobody, 100% of it inside
+    # settlements that DO have matched addresses). Ignoring them lets the matched cells tile the
+    # settlement, so each station fills its village out to the boundary and its islands join up.
+    # Non-overlap is untouched: this is still a Voronoi over matched points, so a cell can never
+    # reach another station's matched address — the same argument as the territory fill itself.
+    sids_all = df["station_id"].to_numpy()
+    seed_mask = sids_all != UNASSIGNED
+    seed_idx = np.flatnonzero(seed_mask)
+
+    # Spatial index over the seed points, used to gather the halo (foreign points within a
     # settlement's boundary bbox) that constrains territory cells so they don't cross into a
-    # neighbouring settlement's addresses where naselje boundaries overlap.
-    pt_tree = shapely.STRtree(shapely.points(X, Y))
+    # neighbouring settlement's addresses where naselje boundaries overlap. Indices are mapped
+    # back to global positions via `seed_idx`.
+    pt_tree = shapely.STRtree(shapely.points(X[seed_idx], Y[seed_idx]))
 
     idx_by_sett: dict[int, np.ndarray] = {
-        int(c): np.flatnonzero(SETT == c) for c in range(len(sett_codes))
+        int(c): np.flatnonzero((SETT == c) & seed_mask) for c in range(len(sett_codes))
     }
 
     # Official settlement (naselje) boundaries. Each station's Voronoi cells are clipped to its
@@ -475,9 +658,12 @@ def main() -> int:
     # Loaded once and reused for the whole-settlement claim geometry below.
     sett_boundaries = load_settlement_boundaries()
 
-    # Accumulate cells per station across settlements.
+    # Accumulate cells per station across settlements. `station_setts` records WHICH settlements
+    # each station has coverage in (cells here, whole-settlement claims below) — the hole-closing
+    # pass needs it to tell "empty land inside my own village" (fill) from "a village I don't
+    # cover at all, enclosed by my territory" (keep the hole; it belongs to whoever RIK listed).
     station_cells: dict[int, list] = {}
-    sids_all = df["station_id"].to_numpy()
+    station_setts: dict[int, set[str]] = {}
     n_compute = 0
     for code, own_idx in idx_by_sett.items():
         if len(own_idx) == 0:
@@ -508,7 +694,7 @@ def main() -> int:
                 min(bx0, float(xy[:, 0].min())) - m, min(by0, float(xy[:, 1].min())) - m,
                 max(bx1, float(xy[:, 0].max())) + m, max(by1, float(xy[:, 1].max())) + m,
             )
-            cand_arr = pt_tree.query(qbox)
+            cand_arr = seed_idx[pt_tree.query(qbox)]
             if len(cand_arr):
                 foreign = cand_arr[SETT[cand_arr] != code]
                 if len(foreign):
@@ -524,18 +710,18 @@ def main() -> int:
                             seen.add(k)
                             cand.extend(buckets.get(k, ()))
             cand_arr = np.asarray(cand, dtype=np.int64)
+            cand_arr = cand_arr[seed_mask[cand_arr]]  # unmatched points don't constrain either
             foreign = cand_arr[SETT[cand_arr] != code]
             if len(foreign):
                 halo_xy = np.column_stack([X[foreign], Y[foreign]])
 
         for sid, cells in cells_for_settlement(xy, sids, halo_xy, boundary).items():
-            if sid == UNASSIGNED:
-                continue
             # Defensive: in scoped mode only ever touch affected stations' polygons, so a
             # stray station in a recomputed settlement can't get a half-recomputed polygon.
             if affected is not None and sid not in affected:
                 continue
             station_cells.setdefault(sid, []).extend(cells)
+            station_setts.setdefault(sid, set()).add(str(sett_codes[code]))
     settlements = sett_codes  # for the summary line
 
     # Whole-settlement coverage: a station that claims a whole settlement gets the official
@@ -572,6 +758,7 @@ def main() -> int:
             sid = int(sid)
             geoms = []
             for s in grp["settlement_id"].to_list():
+                station_setts.setdefault(sid, set()).add(str(s))
                 if s in partitions:
                     # Contested + splittable: only this claimant's share (None if it has no
                     # addresses here, in which case it draws nothing and the co-claimant owns it).
@@ -627,8 +814,8 @@ def main() -> int:
     if n_osm_rejected:
         print(f"  OSM claims rejected (overlap other stations' coverage): {n_osm_rejected:,}")
 
-    rows: list[dict] = []
-    now = datetime.now(timezone.utc).isoformat()
+    # ── Pass 1: merge each station's cells + claims, clip to the municipality, despike ──────
+    merged_by_sid: dict[int, object] = {}
     n_clipped = 0
     n_sett = 0
     for sid in set(station_cells) | set(claim_geom):
@@ -663,31 +850,185 @@ def main() -> int:
         )
         if not smoothed.is_empty:
             merged = smoothed
-        # Drop tiny interior holes (the gaps the per-cell octagons leave when they don't tile a
-        # village perfectly) so volunteers get clean shapes. A hole is KEPT if it is large (a
-        # genuine enclave) OR it encloses ANOTHER station's matched address — filling the latter
-        # would make this polygon cover a foreign address, breaking one-address-one-station. The
-        # foreign check reuses the coarse point grid (`_osm_foreign_overlap` returns (own, other)).
-        merged = drop_small_holes(
-            merged.buffer(0), config.POLYGON_MIN_HOLE_M2,
-            keep_ring=lambda ring: _osm_foreign_overlap(ring, sid, X, Y, sids_all, buckets, B)[1] > 0,
+        merged_by_sid[sid] = merged.buffer(0)
+
+    # Stations left untouched by an incremental scope still own land and still claim holes, but
+    # their shapes only exist on disk — load them so both passes below see the full picture.
+    prev_ids, prev_geoms = previous_polygons(exclude=affected) if affected is not None else ([], [])
+
+    # ── Pass 1.5: hand each station the unclaimed land nearest to its addresses ─────────────
+    # Settlements are tessellated independently and clipped to their own naselje boundary, so
+    # land inside one naselje that is nearer an address in the next one is dropped by both — the
+    # corridors that cut a village station into islands and the bays along the municipality
+    # edge. Split that leftover by nearest matched address (see `residual_shares`): the polygons
+    # then tile the municipality, islands join their main body, and each grows out to the
+    # municipality boundary. EXCLUDED: a settlement with no matched address at all (its village
+    # is somebody else's coverage gap, not the neighbours' land — the same rule hole-closing
+    # applies to Боранци), so those stay visibly uncovered.
+    matched_df = df.filter(pl.col("station_id") != UNASSIGNED)
+    sett_with_matches = set(matched_df["settlement_id"].unique().to_list())
+    setts_by_muni = {
+        str(m): [str(s) for s in ss]
+        for m, ss in df.group_by("municipality_id").agg(pl.col("settlement_id").unique()).rows()
+    }
+    fill_munis = matched_df if affected is None else matched_df.filter(
+        pl.col("municipality_id").is_in(
+            matched_df.filter(pl.col("station_id").is_in(list(affected)))["municipality_id"]
+            .unique().to_list()
         )
+    )
+    n_fill_stations = 0
+    fill_area = 0.0
+    fill_ids = list(merged_by_sid) + prev_ids
+    fill_geoms = [merged_by_sid[s] for s in merged_by_sid] + prev_geoms
+    fill_tree = shapely.STRtree(fill_geoms)
+    n_fill_munis = len(fill_munis["municipality_id"].unique())
+    t_fill = time.monotonic()
+    for i_muni, ((mid,), grp) in enumerate(
+            fill_munis.group_by("municipality_id", maintain_order=True), start=1):
+        mb = boundaries.get(str(mid))
+        if mb is None:
+            continue  # no official boundary -> nothing to grow into
+        t_muni = time.monotonic()
+        covered = [fill_geoms[k] for k in fill_tree.query(mb, predicate="intersects")]
+        residual = mb.difference(unary_union(covered)) if covered else mb
+        empty = [sett_boundaries[s] for s in setts_by_muni.get(str(mid), ())
+                 if s not in sett_with_matches and s in sett_boundaries]
+        if empty:
+            residual = residual.difference(unary_union(empty))
+        if residual.is_empty:
+            continue
+        shares = residual_shares(
+            residual,
+            np.column_stack([grp["x"].to_numpy(), grp["y"].to_numpy()]),
+            grp["station_id"].to_numpy(),
+        )
+        # Route each piece to a polygon it actually MERGES with (see `attach_owner`), so filling
+        # never leaves a station a new island. A piece holding a matched address always stays
+        # with its Voronoi owner — that address is by construction the owner's (one cell, one
+        # address) — even when that means keeping it detached. The address lookup runs only for
+        # the few pieces that would otherwise move or be dropped.
+        pieces: dict[int, list] = {}
+        for sid, share in shares.items():
+            for piece in _parts(share):
+                if piece.area < config.POLYGON_MIN_FILL_PIECE_M2:
+                    continue
+                owner = attach_owner(piece, sid, fill_tree, fill_geoms, fill_ids)
+                if owner != sid and len(pt_tree.query(piece, predicate="contains")) > 0:
+                    owner = sid  # holds its own address: never hand it to someone else
+                if owner is None:
+                    continue  # adjoins nothing it could merge into — leave it unclaimed
+                pieces.setdefault(owner, []).append(piece)
+        for sid, geoms in pieces.items():
+            if affected is not None and sid not in affected:
+                continue  # out of scope: its share waits for that municipality's own recompute
+            share = geoms[0] if len(geoms) == 1 else unary_union(geoms)
+            base = merged_by_sid.get(sid)
+            merged_by_sid[sid] = (unary_union([base, share]) if base is not None else share).buffer(0)
+            n_fill_stations += 1
+            fill_area += share.area
+        print(f"    [{i_muni}/{n_fill_munis}] muni {mid}: filled in {time.monotonic() - t_muni:,.1f}s"
+              f" (total {time.monotonic() - t_fill:,.0f}s)", flush=True)
+    if n_fill_stations:
+        print(f"  residual fill: {fill_area / 1e6:,.0f} km² of unclaimed land -> "
+              f"{n_fill_stations:,} station polygons")
+
+    # ── Hole closing: indexes over everything that can CLAIM a hole ────────────────────────
+    # Other stations' polygons (this run's, plus the out-of-scope ones loaded above) and the
+    # official naselje boundaries, so a hole lying in a settlement this station doesn't cover
+    # stays open.
+    poly_ids = list(merged_by_sid) + prev_ids
+    poly_geoms = [merged_by_sid[s] for s in merged_by_sid] + prev_geoms
+    poly_tree = shapely.STRtree(poly_geoms)
+    sett_ids = list(sett_boundaries)
+    sett_geoms = [sett_boundaries[s] for s in sett_ids]
+    sett_tree = shapely.STRtree(sett_geoms)
+
+    def drifted_over_foreign(simplified, merged, sid: int) -> bool:
+        """Did simplifying push this polygon's boundary over another station's matched address?
+
+        Only the land the simplified shape GAINED can do that, and that is a thin band along the
+        boundary — so this checks the difference, not the whole polygon, which keeps it cheap
+        enough to run for every station."""
+        try:
+            gained = simplified.difference(merged)
+        except Exception:  # pragma: no cover - defensive against GEOS edge cases
+            return False
+        if gained.is_empty:
+            return False
+        return any(sids_all[seed_idx[i]] != sid
+                   for i in pt_tree.query(gained, predicate="contains"))
+
+    def keep_hole(ring: Polygon, sid: int, own_setts: frozenset) -> bool:
+        """Is this hole claimed by another station (see `hole_is_claimed`)? Foreign addresses
+        come from the coarse point grid (`_osm_foreign_overlap` returns (own, other))."""
+        return hole_is_claimed(
+            ring.area,
+            _osm_foreign_overlap(ring, sid, X, Y, sids_all, buckets, B)[1],
+            _covered_area(ring, poly_tree, poly_geoms, poly_ids, skip=lambda s: s == sid),
+            _covered_area(ring, sett_tree, sett_geoms, sett_ids, skip=own_setts.__contains__),
+        )
+
+    # ── Pass 2: close unclaimed holes, simplify, emit ──────────────────────────────────────
+    rows: list[dict] = []
+    now = datetime.now(timezone.utc).isoformat()
+    n_holes_closed = 0
+    n_holes_kept = 0
+    n_drift = 0        # stations where the simplify tolerance drifted over a foreign address
+    n_drift_fixed = 0  # ...of which a finer tolerance fixed within the size budget
+    for sid, merged in merged_by_sid.items():
+        # Close the holes no other station covers — the tiny gaps the cells leave plus the much
+        # larger discarded cells of UNASSIGNED addresses (an unmatched street punches its whole
+        # Voronoi cell out of the station that surrounds it). Land nobody else has belongs to
+        # the surrounding station, and filling it can't create overlap.
+        own_setts = frozenset(station_setts.get(sid, ()))
+        before = sum(len(p.interiors) for p in _parts(merged))
+        merged = close_unclaimed_holes(
+            merged, keep_ring=lambda ring, _s=sid, _o=own_setts: keep_hole(ring, _s, _o)
+        )
+        kept = sum(len(p.interiors) for p in _parts(merged))
+        n_holes_closed += before - kept
+        n_holes_kept += kept
         area = merged.area  # m^2 (UTM)
-        # Adaptive simplification: whole-village polygons can exceed the D1 statement
-        # budget (~50KB); escalate tolerance until the GeoJSON fits. Simplify + the nonlinear
-        # UTM->WGS84 reprojection can leave a self-intersection near the many-holed boundaries
-        # the generalize step produces, so the reprojected geometry is validity-repaired (a
-        # buffer(0) is topology-only, CRS-agnostic) — keeping the output 100% OGC-valid.
-        gj = None
-        for tol in (config.SIMPLIFY_TOL_M, 15, 40, 100, 250):
-            wgs = to_wgs84(merged.simplify(tol, preserve_topology=True))
+
+        def as_geojson(geom):
+            """WGS84 GeoJSON of a UTM geometry. Simplify + the nonlinear reprojection can leave
+            a self-intersection near the many-holed boundaries the generalize step produces, so
+            the result is validity-repaired (buffer(0) is topology-only, CRS-agnostic) — keeping
+            the output 100% OGC-valid."""
+            wgs = to_wgs84(geom)
             if not wgs.is_valid:
                 repaired = wgs.buffer(0)
                 if not repaired.is_empty:
                     wgs = repaired
-            gj = json.dumps(mapping(wgs), ensure_ascii=False)
-            if len(gj.encode()) <= 45_000:
+            return json.dumps(mapping(wgs), ensure_ascii=False)
+
+        # Adaptive simplification: whole-village polygons can exceed the D1 statement budget
+        # (~50KB); escalate the tolerance until the GeoJSON fits.
+        #
+        # Simplification moves the boundary by up to `tol`, and since the territory fill makes
+        # the polygons TILE their municipality, they now share long borders with neighbours —
+        # so a neighbour's address sitting within `tol` of a shared border can drift INSIDE.
+        # Measured: 5 m tolerance swallowed 37 such addresses nationwide, all within 3.4 m of the
+        # border. When that happens, back off to a finer tolerance; the size budget is the hard
+        # constraint, so a station that cannot be both clean and small keeps the small version.
+        gj = None
+        for tol in (config.SIMPLIFY_TOL_M, 15, 40, 100, 250):
+            simplified = merged.simplify(tol, preserve_topology=True)
+            gj = as_geojson(simplified)
+            if len(gj.encode()) > 45_000:
+                continue
+            if not drifted_over_foreign(simplified, merged, sid):
                 break
+            n_drift += 1
+            for finer in (2.0, 0.5, 0.0):
+                alt = merged if finer == 0.0 else merged.simplify(finer, preserve_topology=True)
+                gj_alt = as_geojson(alt)
+                if len(gj_alt.encode()) <= 45_000 and not drifted_over_foreign(alt, merged, sid):
+                    gj = gj_alt
+                    n_drift_fixed += 1
+                    break
+            break
         osm_segs = osm_by_station.get(sid)
         rows.append({
             "station_id": sid,
@@ -760,6 +1101,11 @@ def main() -> int:
             f"  [incremental: {len(municipalities)} muni] recomputed {n_compute:,} "
             f"settlements -> {len(rows):,} station polygons; merged into {n_total:,} total"
         )
+    print(f"  holes closed (unclaimed land): {n_holes_closed:,}  kept (another station's): "
+          f"{n_holes_kept:,}")
+    if n_drift:
+        print(f"  simplify drifted over a neighbour's address: {n_drift:,} station(s), "
+              f"{n_drift_fixed:,} fixed by a finer tolerance")
     return 0
 
 

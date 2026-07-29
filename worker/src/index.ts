@@ -6,7 +6,7 @@ import {
   listMunicipalities, getMunicipality, listStations, getStation, getSegments,
   pointsForStation, streetLinesForStation, allMuniPolygons, effectiveParsed, searchStreets,
   muniBoundaries, allBoundaries, summaryStats, settIdOfPick, NONE_PICK,
-  removedStationIds, ADDED_STATION_BASE, isAddedStationId, polyVariant,
+  removedStationIds, ADDED_STATION_BASE, isAddedStationId,
 } from "./db";
 import { getScript, municipalitiesView, stationsView, stationDetailView } from "./views";
 import { buildGeoJSON, buildKML, muniSlug, type ExportRow } from "./export";
@@ -345,9 +345,8 @@ app.get("/api/s/:id/streets", async (c) => {
 
 app.get("/api/m/:id/polygons.geojson", async (c) => {
   const script = getScript(c);
-  const variant = polyVariant(c.req.query("v"));  // before/after iteration toggle
   const [rows, bounds, removed] = await Promise.all([
-    allMuniPolygons(c.env.POLY, c.req.param("id"), variant),
+    allMuniPolygons(c.env.POLY, c.req.param("id")),
     muniBoundaries(c.env.DB, c.req.param("id")),
     removedStationIds(c.env.DB, c.req.param("id")),
   ]);
@@ -421,12 +420,11 @@ app.get("/api/s/:id/street-lines.geojson", async (c) => {
 
 app.get("/api/s/:id/polygon.geojson", async (c) => {
   const id = Number(c.req.param("id"));
-  const variant = polyVariant(c.req.query("v"));  // before/after iteration toggle
   const st = await getStation(c.env.DB, id);
   // One R2 read of the muni blob yields this station's polygon AND its neighbours.
   const [rows, bounds, removed] = st
     ? await Promise.all([
-        allMuniPolygons(c.env.POLY, st.municipality_id, variant),
+        allMuniPolygons(c.env.POLY, st.municipality_id),
         muniBoundaries(c.env.DB, st.municipality_id),
         removedStationIds(c.env.DB, st.municipality_id),
       ])

@@ -14,9 +14,9 @@
 #
 # Usage: sync_r2.sh [bucket]
 #   env: R2_RETRIES (default 4), R2_FORCE=1 (ignore manifest, upload everything)
-#        R2_KEY_PREFIX (default "polygons") — the object-key prefix to write under. Set to
-#          e.g. "polygons-v2" to publish a CANDIDATE iteration alongside the live "polygons/"
-#          blobs (the Worker's ?v=candidate variant reads it) without touching production.
+#        R2_KEY_PREFIX (default "polygons") — the object-key prefix to write under. The Worker
+#          always serves "polygons/", so a non-default prefix only STAGES blobs in the bucket
+#          (nothing reads them until they are republished under the default prefix).
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BUCKET="${1:-bm-obuhvati-polygons}"
