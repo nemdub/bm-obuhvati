@@ -213,11 +213,14 @@ def _auto_props(m: dict, n: int, opstina_cyr: str, st: dict | None = None) -> di
     return props
 
 
-def combine_muni(polygon_muni_id: str, opstina_cyr: str, poly_dir: Path) -> tuple[list[dict], dict]:
+def combine_muni(polygon_muni_id: str, opstina_cyr: str, poly_dir: Path,
+                 force_source: str | None = None) -> tuple[list[dict], dict]:
     """Produce the combined feature list for one municipality (single source) + a stats dict.
 
     The whole municipality is emitted from ONE source: all volunteer polygons (raw) or all automated
-    polygons, chosen by ``decide_source``. Sources are never mixed within a municipality."""
+    polygons, chosen by ``decide_source`` (or pinned via ``force_source`` for a single-muni export —
+    e.g. force ``"automatic"`` to get the register polygons with priority/voters still attached).
+    Sources are never mixed within a municipality."""
     auto_utm, auto_wgs, meta = load_automated(polygon_muni_id, poly_dir)
     vol_utm, vol_wgs, rec = load_volunteer_units(polygon_muni_id)
 
@@ -228,6 +231,8 @@ def combine_muni(polygon_muni_id: str, opstina_cyr: str, poly_dir: Path) -> tupl
         return rec[k]["source_file"] in mislocated or not rec[k].get("usable", True)
     usable_vol = {k: g for k, g in vol_utm.items() if not _drop(k)}
     source, reason, completeness = decide_source(usable_vol, auto_utm, len(vol_utm))
+    if force_source:
+        source, reason = force_source, f"{force_source} (pinned for single-muni export)"
 
     # When volunteer polygons existed but none were usable, report WHY (scheme / mislocation).
     if source == "automatic" and vol_utm and not usable_vol:
@@ -329,6 +334,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", choices=["prod", "local"], default="prod",
                     help="automated blobs: 'prod' (fetched, default) or 'local' (fresh stage06 output)")
+    ap.add_argument("--export-muni", metavar="MUNI_ID",
+                    help="export ONE municipality to data/exports/ instead of rebuilding the whole set")
+    ap.add_argument("--as", dest="as_source", choices=["automatic", "volunteer"],
+                    help="pin the source for --export-muni (default: let decide_source pick)")
     args = ap.parse_args()
 
     prod_dir = config.VOLUNTEER_PROD_POLY_DIR
@@ -339,6 +348,22 @@ def main() -> None:
     munis = pl.read_parquet(config.MUNICIPALITIES_PARQUET)
     name_by_id = {str(r["id"]): r["name_cyr"] for r in munis.iter_rows(named=True)}
     lat_by_id = {str(r["id"]): r["name_lat"] for r in munis.iter_rows(named=True)}
+
+    if args.export_muni:
+        pid = args.export_muni
+        if not (poly_dir / f"{pid}.json").exists():
+            raise SystemExit(f"no automated blob for muni {pid} in {poly_dir}")
+        opstina = name_by_id.get(pid, pid)
+        feats, stats = combine_muni(pid, opstina, poly_dir, force_source=args.as_source)
+        exports = config.ROOT_DIR / "data" / "exports"
+        exports.mkdir(parents=True, exist_ok=True)
+        tag = "automated" if stats["source"] == "automatic" else stats["source"]
+        out = exports / f"{slug(lat_by_id.get(pid, pid))}-{tag}.geojson"
+        out.write_text(json.dumps({"type": "FeatureCollection", "features": feats}, ensure_ascii=False))
+        p = sum(1 for f in feats if f["properties"]["priority"] is not None)
+        print(f"{opstina} ({pid}): {len(feats)} {stats['source']} features "
+              f"({p} with priority/voters) -> {out.relative_to(config.ROOT_DIR)}")
+        return
     # register station count per muni — NOT the same as the polygon count (a station with no matched
     # addresses gets no polygon), so the difference is a real automated-coverage gap worth reporting.
     reg_stations: dict[str, int] = {}
