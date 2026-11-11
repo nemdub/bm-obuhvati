@@ -43,6 +43,8 @@ TABLES: dict[str, tuple[Path, list[str]]] = {
         "id", "municipality_id", "number", "name_cyr", "name_lat",
         "address_cyr", "address_lat", "raw_coverage_text", "source_file", "is_amendment",
         "section_cyr",
+        # BM source only (migration 0014); filled with NULL when the parquet lacks them (RIK source).
+        "bm_id", "register_id", "voter_count", "lat", "lon",
     ]),
     "coverage_segments": (config.SEGMENTS_PARQUET, [
         "id", "station_id", "settlement_raw", "street_raw", "street_id", "kind",
@@ -480,7 +482,10 @@ def main() -> int:
     present: dict[str, pl.DataFrame] = {}
     for table, (path, _cols) in TABLES.items():
         if table in wanted and path.exists():
-            present[table] = pl.read_parquet(path)
+            df = pl.read_parquet(path)
+            if table == "polling_stations":
+                df = df.with_columns([pl.lit(None).alias(c) for c in _cols if c not in df.columns])
+            present[table] = df
 
     if not present:
         raise SystemExit("No stage artifacts found to build from.")

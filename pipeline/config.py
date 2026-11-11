@@ -16,7 +16,16 @@ ARTIFACTS_DIR = PIPELINE_DIR / "artifacts"
 REGISTER_CSV = DATA_DIR / "kucni_broj.csv"
 ULICA_CSV = DATA_DIR / "ulica.csv"   # official street register (authoritative street list + line geometry)
 NASELJE_CSV = DATA_DIR / "naselje.csv"   # official settlement (naselje) boundary polygons (UTM34N WKT)
-DOCS_DIR = DATA_DIR / "polling_stations_2022"
+DOCS_DIR = DATA_DIR / "polling_stations_2022"   # RIK Word docs (legacy station source, STATION_SOURCE="rik")
+# Station source. "bm" = the bm.itblokada.org export (stage02_fetch_bm.py; current register +
+# verbatim covered addresses); "rik" = the 2022 RIK Word documents (stage02_extract_docs.py),
+# kept for rollback. See docs/parsing-matching/13-bm-source.md.
+STATION_SOURCE = "bm"
+BM_EXPORT_URL = "https://bm.itblokada.org/api/stations/export?format=json&include=covered_addresses"
+BM_DIR = DATA_DIR / "bm"                      # raw export snapshots (export-<date>.json)
+BM_LATEST_JSON = BM_DIR / "latest.json"       # the export the current artifacts were built from
+BM_NO_MATCH_INFO_MAX = 2   # a BM segment listing <= this many houses, none in the register, is not flagged
+ENV_FILE = ROOT_DIR / ".env"                  # optional, gitignored: BM_API_KEY=...
 OPSTINE_GEOJSON = DATA_DIR / "opstine.geojson"   # official municipality boundaries (WGS84)
 GRADOVI_GEOJSON = DATA_DIR / "gradovi.geojson"   # companion city layer (optional; fills munis missing above)
 
@@ -38,6 +47,7 @@ AMENDMENTS_PARQUET = ARTIFACTS_DIR / "amendments.parquet"
 LINKS_PARQUET = ARTIFACTS_DIR / "links.parquet"
 POLYGONS_PARQUET = ARTIFACTS_DIR / "polygons.parquet"
 MUNI_BOUNDARIES_PARQUET = ARTIFACTS_DIR / "muni_boundaries.parquet"  # simplified boundaries for the UI
+BM_SKIPPED_CSV = ARTIFACTS_DIR / "bm_skipped_stations.csv"  # BM stations left out (diaspora/prison/no register muni)
 DOC_MUNI_MAP = ARTIFACTS_DIR / "doc_municipality_map.csv"  # filename -> municipality (review me)
 OVERRIDES_JSON = ARTIFACTS_DIR / "overrides.json"  # reviewer edits exported from D1 (fetch_overrides.sh)
 ADDITIONS_JSON = ARTIFACTS_DIR / "additions.json"  # reviewer-added street claims (fetch_overrides.sh)
@@ -224,7 +234,9 @@ DOC_MUNI_OVERRIDES: dict[str, str] = {
 # Scope-merge groups: NON-sectioned city docs where the member town has no stations of its
 # own (numbering is continuous). The member's addresses are matched by the rep's stations,
 # and the member is hidden in the UI (parent_id).
-CITY_GROUPS: list[dict] = [
+# BM source: the current register gives Vranjska Banja, Kostolac and Sevojno their OWN stations
+# (own numbering, own municipality id), so nothing is grouped — the list is RIK-only.
+CITY_GROUPS: list[dict] = [] if STATION_SOURCE == "bm" else [
     {"rep": "70432", "members": ["71358"]},  # Vranje + Vranjska Banja
     {"rep": "70947", "members": ["71340"]},  # Požarevac + Kostolac
     {"rep": "71145", "members": ["71366"]},  # Užice + Sevojno
@@ -280,6 +292,19 @@ def parent_of(municipality_id: str) -> str | None:
 
 def rep_name(municipality_id: str) -> tuple[str, str] | None:
     return _REP_NAME.get(municipality_id)
+
+
+def read_env_file() -> dict[str, str]:
+    """KEY=VALUE pairs from the repo-root .env (gitignored), if present. Secrets such as
+    BM_API_KEY live there or in the process environment — never in the repo."""
+    out: dict[str, str] = {}
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
 
 
 def ensure_artifacts() -> None:

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Stage 02 — extract polling-station tables from the RIK Word documents.
+"""Stage 02 (LEGACY source) — extract polling-station tables from the RIK Word documents.
+
+Superseded by ``stage02_fetch_bm.py`` (config.STATION_SOURCE = "bm"); kept for rollback
+(STATION_SOURCE = "rik"). See docs/parsing-matching/13-bm-source.md.
 
 Uses macOS ``textutil`` to read both legacy ``.doc`` (-> txt, linearized table) and
 ``.docx`` (-> html, table cells preserved). Classifies each file as base / amendment /
@@ -9,8 +12,8 @@ military, maps the filename to a register municipality, and emits:
   artifacts/amendments_raw.parquet  raw text of amendment docs (parsed later in stage03b)
   artifacts/doc_municipality_map.csv filename -> matched municipality (review low-confidence rows)
 
-Station id is deterministic: int(municipality_id) * 10000 + number, so it is stable
-across re-runs (manual coverage edits link to it).
+Station id is int(municipality_id) * 100000 + the station's running index within the
+municipality (document order), so it is stable across re-runs of the SAME documents.
 
 Usage:
   python3 stage02_extract_docs.py

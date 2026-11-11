@@ -120,6 +120,7 @@ def build_addresses(lf: pl.LazyFrame) -> pl.DataFrame:
         "lat", "lon", "x", "y",
         "opstina_ime", "opstina_ime_lat",
         "naselje_ime", "naselje_ime_lat",
+        "ulica_ime", "ulica_ime_lat",
     )
 
 
@@ -160,6 +161,32 @@ def build_streets(ulica: pl.DataFrame) -> pl.DataFrame:
         .map_elements(normalize_street, return_dtype=pl.String)
         .alias("name_norm")
     )
+
+
+def add_house_only_streets(streets: pl.DataFrame, addr_full: pl.DataFrame) -> pl.DataFrame:
+    """Append streets that the house register references but the street register lacks.
+
+    The two CSVs are separate exports and can be from different dates, so a few house rows may
+    point at a street id that ulica.csv does not (yet / any longer) carry. Without a street row
+    those addresses break the addresses.street_id foreign key — D1 rejects the whole address
+    load. The street's name and settlement come from the house rows themselves."""
+    cols = {"street_id", "settlement_id", "ulica_ime", "ulica_ime_lat"}
+    if not cols <= set(addr_full.columns):
+        return streets
+    missing = (
+        addr_full.filter(~pl.col("street_id").is_in(streets["id"].to_list()))
+        .unique(subset="street_id", keep="first")
+        .select(
+            pl.col("street_id").alias("id"), "settlement_id",
+            pl.col("ulica_ime").alias("name_cyr"), pl.col("ulica_ime_lat").alias("name_lat"),
+        )
+    )
+    if missing.is_empty():
+        return streets
+    missing = missing.with_columns(
+        pl.col("name_cyr").map_elements(normalize_street, return_dtype=pl.String).alias("name_norm"))
+    print(f"  streets missing from ulica.csv, added from the house register: {missing.height}")
+    return pl.concat([streets, missing.select(streets.columns)], how="vertical_relaxed")
 
 
 def settlements_from_ulica(ulica: pl.DataFrame) -> pl.DataFrame:
@@ -271,6 +298,7 @@ def main() -> int:
     ulica = ulica_lf.collect()
 
     streets = build_streets(ulica)
+    streets = add_house_only_streets(streets, addr_full)
 
     # Union settlements referenced by the street register that the addresses don't
     # cover (settlements with streets but no houses) — keeps streets.settlement_id FK valid.

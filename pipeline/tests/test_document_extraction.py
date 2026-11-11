@@ -307,6 +307,10 @@ class TestSectionLabels:
         return [(None, n, f"BM{n}", "addr", "cov") for n in numbers]
 
     def test_number_reset_splits_into_city_then_member(self, monkeypatch):
+        # City groups are RIK-only (config.CITY_GROUPS is empty under the BM source, where the
+        # member towns have their own stations) — opt into the Požarevac+Kostolac group here.
+        monkeypatch.setattr(S2.config, "is_group_rep", lambda m: m == "70947")
+        monkeypatch.setattr(S2.config, "group_members", lambda m: ["71340"] if m == "70947" else [])
         # 1..3 (city) then 1..2 (Kostolac) → first block ПОЖАРЕВАЦ, second КОСТОЛАЦ.
         rows = self._rows([1, 2, 3, 1, 2])
         labels = S2.section_labels_for_rows(rows, "70947", self.NAMES)

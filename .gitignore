@@ -26,3 +26,8 @@ worker/dist/
 .wrangler
 .claude
 .idea
+
+# Local state snapshots (pipeline/backup_state.sh)
+backups/
+# Raw bm.itblokada.org exports + API key
+.env

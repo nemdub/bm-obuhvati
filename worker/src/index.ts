@@ -56,6 +56,12 @@ app.get("/api/s/:id/segments", async (c) => {
         (s.review_reason ?? "").includes("settlement_claim") && !s.ov_street_id;
       // Reviewer confirmed the street does not exist in the register (sentinel pick).
       const streetMissing = s.ov_street_id === NONE_PICK;
+      // "НЕМА УЛИЦЕ" clause (BM source): not a street — it claims the unlisted streets of the
+      // station's home settlement, carried as "no_street:<settlement>" in review_reason. It has
+      // no street_id by design, so it must not be shown as an unresolved street.
+      const noStreetCode = (s.review_reason ?? "").split(",").find((c) => c.split(":")[0] === "no_street");
+      const noStreet = s.kind === "no_street" && !s.ov_street_id && noStreetCode !== undefined;
+      const noStreetHome = noStreet ? (noStreetCode!.split(":")[1] ?? "") : "";
       return {
         id: s.id,
         street_raw: tr(s.street_raw, script),
@@ -63,8 +69,11 @@ app.get("/api/s/:id/segments", async (c) => {
           ? tr(s.ov_street_name_cyr, script)
           : settlementClaim
             ? tr(s.street_raw, script)
+            : noStreet
+              ? tr(noStreetHome ? `Без улице — ${noStreetHome}` : "Без улице", script)
             : s.street_name_cyr ? tr(s.street_name_cyr, script) : null,
-        street_resolved: !streetMissing && !!(s.ov_street_id ?? s.street_id),
+        street_resolved: !streetMissing && (noStreet || !!(s.ov_street_id ?? s.street_id)),
+        no_street: noStreet,
         street_missing: streetMissing,
         // Whole-settlement (village-name) claim: covers EVERY street of the settlement, so the
         // client marks it distinctly — otherwise it looks like an ordinary whole-street segment.
@@ -98,7 +107,7 @@ app.get("/api/s/:id/segments", async (c) => {
             if (base === "ambiguous" && param) {
               text += `: ${tr(param.split("|").join(", "), script)}`;
             }
-            if (base === "settlement_claim" && param) {
+            if ((base === "settlement_claim" || base === "no_street") && param) {
               text += `: ${tr(param, script)}`;
             }
             return text;

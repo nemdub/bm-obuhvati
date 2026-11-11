@@ -32,24 +32,34 @@ Two halves:
 - `data/kucni_broj.csv` — address register, 2,484,921 rows. Street/house number (Cyrillic
   + Latin), settlement/municipality ids, `wkt` = `POINT(x y)` in **UTM Zone 34N
   (EPSG:32634)**, reprojected to WGS84 for mapping.
-- `data/polling_stations_2022/` — 211 MS Word files (168 `.doc`, 43 `.docx`), one per
-  municipality, ~46 amendment files. Downloaded via `scrape_polling_stations.py`.
+- `data/bm/export-<date>.json` — **station source**: the bm.itblokada.org bulk export (every
+  polling station of the current register with its verbatim covered addresses), fetched by
+  `pipeline/stage02_fetch_bm.py`. Needs `BM_API_KEY` (env var or the gitignored `.env`). See
+  `docs/parsing-matching/13-bm-source.md`.
+- `data/polling_stations_2022/` — legacy station source (211 RIK Word files, Jan 2022), used
+  only with `config.STATION_SOURCE = "rik"`. Downloaded via `scrape_polling_stations.py`.
 
 ## Pipeline
 
-Requires macOS (`textutil` for Word extraction) and the `.venv`:
+Requires the `.venv` (macOS `textutil` only for the legacy RIK source):
 
 ```bash
 python3 -m venv .venv && .venv/bin/python -m pip install -e pipeline   # or install deps from pipeline/pyproject.toml
 cd pipeline
 ../.venv/bin/python stage01_load_register.py        # CSV -> parquet, reproject (+ reference tables)
-../.venv/bin/python stage02_extract_docs.py         # Word docs -> stations + raw amendments
+BM_API_KEY=... ../.venv/bin/python stage02_fetch_bm.py   # bm.itblokada.org export -> stations
 ../.venv/bin/python stage03_parse_coverage.py       # coverage text -> segments
-../.venv/bin/python stage03b_apply_amendments.py    # apply amendment ops to segments
+../.venv/bin/python stage03b_apply_amendments.py    # pass-through for the BM source (no amendments)
 ../.venv/bin/python stage04_match_addresses.py      # resolve streets + match register addresses
 ../.venv/bin/python stage05_voronoi.py              # per-settlement Voronoi -> station polygons
-../.venv/bin/python stage06_build_sqlite.py         # assemble bm.sqlite + import_*.sql
+../.venv/bin/python stage06_build_sqlite.py         # assemble bm.sqlite + import_*.sql + R2 polygon blobs
 ```
+
+Before a source switch or any risky re-run, snapshot production + local state with
+`pipeline/backup_state.sh <label>` (→ `backups/<date>-<label>/`, with a `RESTORE.md`).
+`pipeline/compare_sources.py` reports the previous run against the current one. Polygons are
+served from R2: `pipeline/sync_r2.sh` uploads `artifacts/r2/` (see `recompute.sh` for the full
+deploy sequence).
 
 Stage 01 and `--municipalities "ADA,BOR,SUBOTICA"` (stage01) / `--files` (stage02) /
 `--municipality <id>` (stage03) flags produce a fast dev subset.

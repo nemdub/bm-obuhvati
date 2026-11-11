@@ -38,7 +38,7 @@ def collapse(s: str) -> str:
 class Segment:
     settlement_raw: str
     street_raw: str
-    kind: str  # street_numbers | whole_street | named_block | unknown
+    kind: str  # street_numbers | whole_street | named_block | no_street | unknown
     intervals: list[list[int]] = field(default_factory=list)      # [[lo, hi], ...]
     singles: list[list] = field(default_factory=list)             # [[num, "suffix"], ...]
     unknown_tokens: list[str] = field(default_factory=list)
@@ -482,6 +482,67 @@ def parse_structured(text: str) -> list[Segment]:
     return segments
 
 
+# ── BM dialect (bm.itblokada.org `covered_addresses`) ───────────────────────────────────────
+# The voter-roll decision text, machine-generated: `Улица <NAME> бројеви <n>, <n>, …;` per street,
+# EVERY house number listed explicitly — no ranges, no parity words, no settlement labels. Two
+# things differ from the hand-written RIK dialects and are why this is its own parser:
+#   - `23-2`, `23/2`, `7-А/3` are ONE house (number 23, sub-number 2 / suffix А, entrance 3), never
+#     a range. The address register only carries letter suffixes, so a numeric sub-part is dropped
+#     (the house is matched by its number; a bare number already implies its suffixed variants).
+#   - `Улица НЕМА УЛИЦЕ` ("no street") is not a street: it stands for the voters whose address
+#     has no street at all (mostly villages). It becomes a `no_street` segment, which stage04
+#     turns into a claim on the station's home settlement.
+NO_STREET_NAME = "НЕМА УЛИЦЕ"
+_BM_CLAUSE = re.compile(r"^Улица\s+(.+?)\s+бројеви\b\s*(.*)$", re.DOTALL)
+_BM_NUM = re.compile(r"^(\d+)\s*[-–/ ]*\s*([A-Za-zА-Яа-яЂ-џ]*)")
+
+
+def is_bm_text(text: str) -> bool:
+    """True when the text is in the BM dialect (its first clause is `Улица … бројеви …`)."""
+    first = collapse(text).split(";", 1)[0].strip()
+    return bool(_BM_CLAUSE.match(first))
+
+
+def parse_bm(text: str) -> list[Segment]:
+    segments: list[Segment] = []
+    for chunk in collapse(text).split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        m = _BM_CLAUSE.match(chunk)
+        if not m:
+            # Not a street clause — keep it visible for review instead of dropping it silently.
+            segments.append(Segment(settlement_raw="", street_raw=chunk, kind="unknown",
+                                    unknown_tokens=[chunk], dialect="bm"))
+            continue
+        street, numbers = _ORDINAL_GLUE.sub(r"\1 \2", m.group(1).strip()), m.group(2)
+        seg = Segment(settlement_raw="", street_raw=street, kind="street_numbers", dialect="bm")
+        seen: set[tuple[int, str]] = set()
+        for tok in numbers.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            nm = _BM_NUM.match(tok)
+            if not nm:
+                seg.unknown_tokens.append(tok)
+                continue
+            num = int(nm.group(1))
+            if num == 0:
+                continue  # "0" = no house number; register numbering starts at 1 (see parse_number_token)
+            key = (num, normalize_suffix(nm.group(2)))
+            if key not in seen:
+                seen.add(key)
+                seg.singles.append([key[0], key[1]])
+        if normalize_street(street) == NO_STREET_NAME:
+            seg.kind = "no_street"
+            seg.whole = True
+        elif not (seg.singles or seg.unknown_tokens):
+            seg.whole = True
+            seg.kind = "whole_street"
+        segments.append(seg)
+    return segments
+
+
 # "Nth part" street names ("Угриновачки пут 1 део"): documents sometimes glue the part
 # word to the following house number ("део13") — split so tokenization sees them apart.
 _DEO_GLUE = re.compile(r"(?i)\b(део)(\d)")
@@ -611,14 +672,19 @@ def _unwrap_number_parens(text: str) -> str:
     return _PAREN_GROUP_RE.sub(repl, text)
 
 
-def parse_coverage(text: str, is_street=None) -> list[Segment]:
+def parse_coverage(text: str, is_street=None, bm: bool = False) -> list[Segment]:
     """Detect dialect and parse the coverage cell into segments.
+
+    `bm=True` (station source = bm.itblokada.org) routes text in the BM dialect to `parse_bm`;
+    anything else (e.g. a reviewer-corrected free text) still goes through the RIK dialects.
 
     `is_street(normalized_name) -> bool`, when supplied, lets the compact parser keep
     street names that contain a literal "и" ("Зрињског и Франкопана") whole instead of
     splitting them on the connector (see `_merge_street_connectors`)."""
     if not text or not text.strip():
         return []
+    if bm and is_bm_text(text):
+        return parse_bm(text)
     text = _LIST_PREAMBLE_RE.sub("", text)
     text = _OBUHVATA_PREAMBLE_RE.sub("", text)
     text = _SETT_SCOPE_RE.sub(r"\1 ", text)

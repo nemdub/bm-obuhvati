@@ -133,6 +133,14 @@ def parse_replacement_doc(path) -> list[dict]:
     return replacements_from_rows(rows)
 
 
+AMENDMENT_AUDIT_SCHEMA = {
+    "id": pl.Int64, "municipality_id": pl.String, "station_number": pl.Int64,
+    "street_raw": pl.String, "op": pl.String, "old_value": pl.String, "new_value": pl.String,
+    "raw_instruction": pl.String, "source_file": pl.String, "applied": pl.Int64,
+    "target_segment_id": pl.Int64,
+}
+
+
 def main() -> int:
     config.ensure_artifacts()
     stations = pl.read_parquet(config.STATIONS_PARQUET)
@@ -299,7 +307,10 @@ def main() -> int:
     cols = ["id", "station_id", "settlement_raw", "street_raw", "kind",
             "parsed_json", "parse_dialect", "source", "amendment_note"]
     pl.DataFrame(segs, infer_schema_length=None).select(cols).write_parquet(config.SEGMENTS_AMENDED_PARQUET)
-    pl.DataFrame(amend_audit, infer_schema_length=None).write_parquet(config.AMENDMENTS_PARQUET)
+    # Explicit schema: with no amendment documents (the BM source) the audit is empty, and an
+    # untyped empty frame would have no columns for stage06 to select.
+    pl.DataFrame(amend_audit, schema=AMENDMENT_AUDIT_SCHEMA, infer_schema_length=None
+                 ).write_parquet(config.AMENDMENTS_PARQUET)
 
     # Flag amended stations and apply `replace_station` name/address patches.
     stations = pl.read_parquet(config.STATIONS_PARQUET).with_columns(

@@ -50,7 +50,8 @@ def segments_for_station(st: dict, muni_and_streets: dict[str, set[str]]) -> lis
     muni_streets = muni_and_streets.get(config.group_rep(st["municipality_id"]), set())
     is_street = muni_streets.__contains__
     rows: list[dict] = []
-    for idx, seg in enumerate(parse_coverage(st["raw_coverage_text"], is_street=is_street)):
+    for idx, seg in enumerate(parse_coverage(
+            st["raw_coverage_text"], is_street=is_street, bm=config.STATION_SOURCE == "bm")):
         rows.append({
             "id": st["id"] * 1000 + idx,
             "station_id": st["id"],

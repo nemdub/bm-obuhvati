@@ -51,6 +51,7 @@ import config
 from common import osm
 from common.boundaries import load_muni_boundaries
 from common.coverage_parse import interval_parity
+from common.io import wgs84_to_utm
 from common.normalize import genitive_variants, normalize_street, suffix_rank
 
 FUZZY_MIN = config.STREET_FUZZY_MIN
@@ -148,8 +149,18 @@ def build_indexes():
     # street the register files under a neighbouring settlement — so, like a no-settlement
     # station, they still get the strict municipality-wide fuzzy last resort.
     station_settlement_inferred: set[int] = set()
+    # BM source: the export carries the register settlement the venue sits in. It is the fallback
+    # when the address names no settlement (the address-derived one wins — it is the settlement
+    # the decision itself names, and the two agree for ~90% of stations).
+    bm_sett = (dict(zip(stations["id"], stations["bm_settlement_id"]))
+               if "bm_settlement_id" in stations.columns else {})
     for sid, addr in zip(stations["id"], stations["address_cyr"]):
         from_addr = resolve_settlement_from_address(addr, station_muni[sid], settlements_by_muni)
+        if from_addr is None:
+            cand = bm_sett.get(sid)
+            cand_muni = sett_to_muni.get(cand) if cand else None
+            if cand_muni and config.group_rep(cand_muni) == station_muni[sid]:
+                from_addr = cand
         station_settlement[sid] = from_addr or town_settlement.get(station_muni[sid])
         if from_addr is None and station_settlement[sid] is not None:
             station_settlement_inferred.add(sid)
@@ -814,6 +825,130 @@ SPEC_INTERVAL = 1
 # (e.g. "2-60" reaching 60а) yields to a claim that names that suffix explicitly — an
 # exact single (spec 3) or a suffix-bounded range edge like "60а-80" (spec SPEC_INTERVAL).
 SPEC_INTERVAL_IMPLIED_SUFFIX = 0.5
+def assign_no_street(ns_by_sett: dict[str, dict[int, int]],
+                     free_by_sett: dict[str, list[tuple[int, float, float]]],
+                     station_xy: dict[int, tuple[float, float]]) -> list[tuple[int, int, int]]:
+    """Hand the unlisted houses of each settlement to its no-street stations.
+
+    `ns_by_sett`: settlement -> {station_id: no_street segment id} (stations whose HOME settlement
+    it is and whose text has a "НЕМА УЛИЦЕ" clause). `free_by_sett`: settlement -> [(address_id,
+    x, y)] for houses on streets NO station claims. `station_xy`: station -> UTM (x, y).
+    Returns (station_id, address_id, segment_id) triples. A sole claimant takes every free
+    house; several claimants split them by nearest station; several claimants of which none is
+    located take nothing (the houses stay for the Voronoi step)."""
+    out: list[tuple[int, int, int]] = []
+    for sett, owners in ns_by_sett.items():
+        free = free_by_sett.get(sett)
+        if not free:
+            continue
+        ids = list(owners)
+        if len(ids) == 1:
+            pick = [ids[0]] * len(free)
+        else:
+            located = [i for i in ids if i in station_xy]
+            if not located:
+                continue
+            tree = cKDTree(np.array([station_xy[i] for i in located]))
+            _, nearest = tree.query(np.array([[x, y] for _, x, y in free]))
+            pick = [located[j] for j in nearest]
+        out.extend((st, aid, owners[st]) for (aid, _x, _y), st in zip(free, pick))
+    return out
+
+
+# House-number evidence thresholds (pass 1.6).
+NUM_EVIDENCE_MIN_HITS = 2      # listed numbers that must exist on the picked street …
+NUM_EVIDENCE_MIN_RATIO = 0.5   # … and their share of the listed numbers
+NUM_EVIDENCE_WEAK_RATIO = 0.2  # a current match below this share is "visibly wrong"
+NUM_EVIDENCE_UNSURE = {"none", "ambiguous", "muni_fallback"}
+
+
+NUM_EVIDENCE_NEAR_NAME_MIN = 0.8  # Damerau-Levenshtein similarity for a near-spelling candidate
+
+
+def near_name_streets(norm: str, sett_scope: dict[str, list[str]]) -> list[str]:
+    """Street ids in one settlement whose normalized name is a near-spelling of `norm`
+    (similarity >= NUM_EVIDENCE_NEAR_NAME_MIN, identical number tokens — the digit guard of
+    `_fuzzy`: "4. ОКТОБРА" is not "6. ОКТОБРА"). Looser than the ladder's fuzzy on purpose:
+    these are only CANDIDATES, and number_evidence_pick accepts one only if the listed house
+    numbers actually exist on it."""
+    nd = _DIGITS_RE.findall(norm)
+    out: list[str] = []
+    for name, ids in sett_scope.items():
+        if name == norm or _DIGITS_RE.findall(name) != nd:
+            continue
+        if DamerauLevenshtein.normalized_similarity(norm, name) >= NUM_EVIDENCE_NEAR_NAME_MIN:
+            out.extend(ids)
+    return out
+
+
+def same_word_forms(a: str, b: str) -> bool:
+    """Do two normalized street names differ only by inflection? Same number of words, and
+    every differing word pair shares a stem: a common prefix of at least max(3, len(shorter)-2)
+    letters. "4 ОКТОБАР"/"4 ОКТОБРА" and "4 ЈУЛИ"/"4 ЈУЛА" pass; "МИЛОША"/"МИЛАНА ОБРЕНОВИЋА",
+    "ИЛИЈЕ"/"МИЈЕ АЛЕКСИЋА" and "ВИНОГРАДСКА"/"ВИНОГРАДАРСКА" do not."""
+    ta, tb = a.split(), b.split()
+    if len(ta) != len(tb):
+        return False
+    for x, y in zip(ta, tb):
+        if x == y:
+            continue
+        common = 0
+        for cx, cy in zip(x, y):
+            if cx != cy:
+                break
+            common += 1
+        if common < max(3, min(len(x), len(y)) - 2):
+            return False
+    return True
+
+
+def number_evidence_pick(listed: set[int], current: str | None, method: str,
+                         candidates: list[str], street_nums,
+                         home: set[str] | frozenset[str] = frozenset()) -> str | None:
+    """Pick the register street a list of explicit house numbers belongs to.
+
+    `candidates` are the same-named streets of the municipality, `street_nums(street_id)` the
+    set of house numbers the register has on a street. Returns the street to use, or None to
+    keep the lexical result. A pick needs >= NUM_EVIDENCE_MIN_HITS listed numbers present AND
+    >= NUM_EVIDENCE_MIN_RATIO of the list, and must beat every other candidate by 2x (so two
+    villages with the same street name and similar numbering stay ambiguous). It is only made
+    when the lexical result is unsure (unresolved / ambiguous / muni_fallback) or visibly wrong
+    (under NUM_EVIDENCE_WEAK_RATIO of the listed numbers exist on it).
+
+    `home` = the candidates lying in the station's own settlements. A station's streets are
+    overwhelmingly in its own settlement, so a home candidate that clears the thresholds and has
+    at least as many hits as every candidate elsewhere wins WITHOUT the 2x margin, and a
+    candidate elsewhere must beat the best home candidate by 2x like any other. Among several
+    home candidates the 2x margin still applies."""
+    if not listed:
+        return None
+    pool = list(dict.fromkeys([*candidates, *([current] if current else [])]))
+    if not pool:
+        return None
+    hits = {sid: len(listed & street_nums(sid)) for sid in pool}
+    cur_ratio = hits[current] / len(listed) if current else 0.0
+    if method not in NUM_EVIDENCE_UNSURE and cur_ratio >= NUM_EVIDENCE_WEAK_RATIO:
+        return None
+    # A single number is enough when it IS the whole list and no other candidate has it.
+    min_hits = min(NUM_EVIDENCE_MIN_HITS, len(listed))
+
+    def clears(sid: str) -> bool:
+        return hits[sid] >= min_hits and hits[sid] / len(listed) >= NUM_EVIDENCE_MIN_RATIO
+
+    ranked = sorted(pool, key=lambda sid: (-hits[sid], sid not in home, sid != current, sid))
+    best = ranked[0]
+    if not clears(best):
+        return None
+    if best in home:
+        # Only OTHER home candidates need the 2x margin (ranking already put home first on ties).
+        rivals = [hits[sid] for sid in ranked[1:] if sid in home]
+    else:
+        rivals = [hits[sid] for sid in ranked[1:]]
+    if rivals and max(rivals) * 2 > hits[best]:
+        return None
+    return best
+
+
 # bez_broja ("бб"): claims a street's no-number (house_num IS NULL) houses. It only ever
 # competes with whole/sett_whole for those NULL-house addresses (intervals/singles need a
 # number), so an explicit "бб" outranks a generic whole-street claim there.
@@ -1065,8 +1200,13 @@ def main() -> int:
         # The scope is an INFERRED town only when neither the segment, a marker, nor the address
         # pinned a settlement — that's when the muni-wide fuzzy last resort still applies.
         settlement_inferred = seg_sett is None and marker_sett is None and home_inferred
-        street_id, method, score, amb_ids = resolve_street(
-            s["street_raw"], muni, settlement_id, idx, settlement_inferred)
+        if s["kind"] == "no_street":
+            # "НЕМА УЛИЦЕ" (BM source): not a street. Resolved after every street-level claim is
+            # known — see the no-street pass below.
+            street_id, method, score, amb_ids = None, "no_street", 60.0, []
+        else:
+            street_id, method, score, amb_ids = resolve_street(
+                s["street_raw"], muni, settlement_id, idx, settlement_inferred)
 
         # Apply reviewer override: manual street wins (if it exists in the register) and
         # manual number edits replace the machine parse for claim building. A "sett:<id>"
@@ -1130,6 +1270,64 @@ def main() -> int:
             r["method"], r["amb_ids"] = "ambiguous", amb
     if n_multi:
         print(f"  multi-settlement matches: {n_multi:,}")
+
+    # Pass 1.6: house-number evidence (BM source). The BM text names no settlement, but it lists
+    # every house number explicitly — and a list of numbers is a fingerprint of the street. Among
+    # the register streets of the municipality that carry the segment's exact (normalized) name,
+    # the one whose real houses contain the listed numbers is the street meant. Used only where
+    # the lexical ladder was unsure or visibly wrong: unresolved / ambiguous / muni_fallback, or
+    # a match on which (almost) none of the listed numbers exist. See number_evidence_pick.
+    if config.STATION_SOURCE == "bm":
+        nums_by_street: dict[str, set[int]] = {}
+
+        def street_nums(sid: str) -> set[int]:
+            got = nums_by_street.get(sid)
+            if got is None:
+                got = nums_by_street[sid] = {n for _a, n, _s in addr_by_street.get(sid, []) if n is not None}
+            return got
+
+        n_num = n_conf = n_near = 0
+        for r in seg_recs:
+            if r["kind"] != "street_numbers" or r["method"].startswith("manual"):
+                continue
+            listed = {n for n, _sfx in r["parsed"].get("singles", [])}
+            if not listed:
+                continue
+            norm = normalize_street(r["street_raw"])
+            cands = list(_bmn.get(station_muni[r["station_id"]], {}).get(norm, []))
+            # Streets of the station's HOME settlement whose name is a near-spelling of the
+            # listed one ("4. ОКТОБАР" in the text, "4. ОКТОБРА" in the register). They join
+            # the candidates and, being in the station's settlement, are preferred — otherwise
+            # the identically spelled street of another village wins on a plausible-looking
+            # number overlap (low house numbers exist on most streets).
+            # "Own" = the HOME settlement only. The derived multi-settlement set would not do:
+            # it already contains the villages reached through the very muni_fallback matches
+            # this pass is second-guessing.
+            own_setts = {station_settlement[r["station_id"]]} if station_settlement.get(r["station_id"]) else set()
+            home = {sid for sid in cands if street_meta[sid]["settlement_id"] in own_setts}
+            for sett in own_setts:
+                home.update(near_name_streets(norm, _bsn.get(sett, {})))
+            if r["street_id"] and street_meta.get(r["street_id"], {}).get("settlement_id") in own_setts:
+                home.add(r["street_id"])
+            cands = list(dict.fromkeys([*cands, *sorted(home)]))
+            pick = number_evidence_pick(listed, r["street_id"], r["method"], cands, street_nums, home)
+            if pick is None:
+                continue
+            if pick == r["street_id"]:
+                n_conf += 1
+            else:
+                n_num += 1
+            # A near-spelling pick is trusted outright only when the spellings differ by an
+            # inflection ("ОКТОБАР"/"ОКТОБРА"); a different word ("МИЛОША"/"МИЛАНА") is shown
+            # to a reviewer like any fuzzy match, numbers or not.
+            pick_norm = street_meta[pick]["name_norm"]
+            sure = pick_norm == norm or pick == r["street_id"] or same_word_forms(norm, pick_norm)
+            n_near += not sure
+            r["street_id"], r["method"], r["score"], r["amb_ids"] = (
+                pick, "numbers" if sure else "numbers_near", 90.0, [])
+        if n_num or n_conf:
+            print(f"  house-number evidence: {n_num:,} re-resolved ({n_near:,} near-spelling, flagged), "
+                  f"{n_conf:,} confirmed")
 
     # Old-name restatements: documents list a renamed street twice per station — once with
     # current numbers ("Београдски пут 127-166") and once under the old name with the OLD
@@ -1315,6 +1513,46 @@ def main() -> int:
     # Pass 2: resolve each street; collect links + per-segment flags.
     links: list[dict] = []
     matched_seg_ids: set[int] = set()
+
+    # No-street pass (BM source). A "НЕМА УЛИЦЕ" clause stands for voters whose registered
+    # address has no street — in practice the houses of the station's HOME settlement on streets
+    # that no station lists at all (villages whose streets were named after those voters
+    # registered, or never). So it claims exactly those: every register street of the home
+    # settlement that carries NO street-level claim from any station. Streets someone lists keep
+    # their unlisted houses for the Voronoi step, as before. Where several no-street stations
+    # share a home settlement each house goes to the nearest of them (station coordinates).
+    no_street_home: dict[int, str | None] = {}      # seg id -> home settlement (None: unresolved)
+    no_street_linked: dict[int, int] = {}           # seg id -> houses it won
+    ns_by_sett: dict[str, dict[int, int]] = {}      # settlement -> {station_id: seg_id}
+    for r in seg_recs:
+        if r["method"] != "no_street":
+            continue
+        home = station_settlement.get(r["station_id"])
+        no_street_home[r["id"]] = home
+        if home:
+            ns_by_sett.setdefault(home, {}).setdefault(r["station_id"], r["id"])
+    if ns_by_sett:
+        _stn = pl.read_parquet(config.STATIONS_PARQUET)
+        station_xy: dict[int, tuple[float, float]] = {}
+        if {"lat", "lon"} <= set(_stn.columns):
+            _geo = _stn.filter(pl.col("lat").is_not_null() & pl.col("lon").is_not_null())
+            xs, ys = wgs84_to_utm(_geo["lon"].to_numpy(), _geo["lat"].to_numpy())
+            station_xy = {int(i): (float(x), float(y)) for i, x, y in zip(_geo["id"], xs, ys)}
+        _addr = pl.read_parquet(config.ADDRESSES_PARQUET, columns=["id", "street_id", "settlement_id", "x", "y"])
+        _addr = _addr.filter(pl.col("settlement_id").is_in(list(ns_by_sett)))
+        free_by_sett: dict[str, list[tuple[int, float, float]]] = {}
+        for aid, st_id, sett, x, y in _addr.iter_rows():
+            if st_id not in claims_by_street:
+                free_by_sett.setdefault(sett, []).append((aid, x, y))
+        n_ns = 0
+        for st, aid, seg_id in assign_no_street(ns_by_sett, free_by_sett, station_xy):
+            links.append({"station_id": st, "address_id": aid, "segment_id": seg_id,
+                          "match_method": "no_street", "confidence": 0.6})
+            no_street_linked[seg_id] = no_street_linked.get(seg_id, 0) + 1
+            n_ns += 1
+        print(f"  no-street claims: {len(no_street_home):,} segments in {len(ns_by_sett):,} settlements "
+              f"-> {n_ns:,} houses  (no home settlement: "
+              f"{sum(1 for h in no_street_home.values() if not h):,})")
     conflict_map: dict[int, set[int]] = {}  # seg_id -> opposing station_ids
     parity_unconfirmed: set[int] = set()
     seg_conf = {r["id"]: round(r["score"] / 100.0, 2) for r in seg_recs}
@@ -1322,12 +1560,16 @@ def main() -> int:
     _st = pl.read_parquet(config.STATIONS_PARQUET)
     station_number = dict(zip(_st["id"], _st["number"]))
 
+    sett_link_stations: dict[str, set[int]] = {}  # settlement -> stations holding street-level links there
     for street_id, claims in claims_by_street.items():
         rows = addr_by_street.get(street_id, [])
         assigned, conflicts, unconfirmed = resolve_street_claims(claims, rows)
         for seg_id, opponents in conflicts.items():
             conflict_map.setdefault(seg_id, set()).update(opponents)
         parity_unconfirmed |= unconfirmed
+        if assigned and street_id in street_meta:
+            sett_link_stations.setdefault(street_meta[street_id]["settlement_id"], set()).update(
+                w["station_id"] for w in assigned.values())
         for aid, win in assigned.items():
             matched_seg_ids.add(win["seg_id"])
             links.append({
@@ -1335,6 +1577,14 @@ def main() -> int:
                 "match_method": "whole_street" if win["kind"] == "whole" else win["kind"],
                 "confidence": seg_conf.get(win["seg_id"], 0.0),
             })
+
+    # A settlement held ONLY by its no-street stations (no other station has a house there) is a
+    # whole-settlement claim: stage05 then draws the official naselje boundary (partitioned
+    # between co-claimants) instead of the ragged point-cloud shape.
+    no_street_sett_claim: set[int] = set()
+    for sett, owners in ns_by_sett.items():
+        if sett_link_stations.get(sett, set()) <= set(owners):
+            no_street_sett_claim.update(seg for seg in owners.values() if no_street_linked.get(seg))
 
     # Finalize per-segment confidence + needs_review (with reason codes explaining why).
     out_segs: list[dict] = []
@@ -1367,6 +1617,19 @@ def main() -> int:
             # the coverage in stage05. Always surfaced so the reviewer confirms the place/extent.
             conf = 0.5
             reasons.append("osm_fallback")
+        elif method == "no_street":
+            # "НЕМА УЛИЦЕ": claims the unlisted streets of the home settlement (no-street pass).
+            # Informational when a home settlement is known; flagged when it is not, because
+            # the clause then covers nothing.
+            home = no_street_home.get(r["id"])
+            conf = 0.6
+            if home:
+                sname = sett_names.get(home, "")
+                reasons.append("no_street:" + sname if sname else "no_street")
+                if r["id"] in no_street_sett_claim:
+                    sett_claims.append({"station_id": r["station_id"], "settlement_id": home})
+            else:
+                reasons.append("no_home_settlement")
         elif r["street_id"] is None:
             conf = 0.2
             reasons.append("street_unresolved")
@@ -1410,8 +1673,15 @@ def main() -> int:
         elif method == "muni_fallback":
             conf = 0.4
             reasons.append("muni_fallback")
+        elif method == "numbers":
+            conf = 0.85  # same-named street chosen/confirmed by its listed house numbers; no flag
+        elif method == "numbers_near":
+            # Near-spelling street of the home settlement, chosen by its house numbers, where
+            # the spellings differ by more than an inflection — confirmable like a fuzzy match.
+            conf = 0.6
+            reasons.append("fuzzy")
         else:
-            conf = 0.95 if r["parse_dialect"] == "structured" else 0.75
+            conf = 0.95 if r["parse_dialect"] in ("structured", "bm") else 0.75
         if parsed.get("unknown_tokens"):
             reasons.append("unknown_tokens")
         if r["kind"] == "named_block":
@@ -1440,7 +1710,15 @@ def main() -> int:
         #    conflict that already lands in conflict_map and adds a `conflict:` reason (two
         #    same-settlement claims both emit sett_whole and tie on every shared house). The
         #    marker is kept so the UI still titles the card by the settlement name.
-        INFORMATIONAL = {"parity_unconfirmed", "settlement_claim"}
+        #  - no_street: a "НЕМА УЛИЦЕ" clause resolved to the station's home settlement.
+        #  - no_match on a short BM list: the BM text enumerates voters' registered addresses, and
+        #    a stray house or two that the address register does not carry (demolished, renumbered)
+        #    is routine and nothing a reviewer can fix. A longer list with no hit at all still
+        #    flags — that points at a wrong street rather than at stale addresses.
+        INFORMATIONAL = {"parity_unconfirmed", "settlement_claim", "no_street"}
+        if (r["parse_dialect"] == "bm"
+                and len(parsed.get("singles") or []) <= config.BM_NO_MATCH_INFO_MAX):
+            INFORMATIONAL = INFORMATIONAL | {"no_match"}
         flagging = [x for x in reasons if x.split(":", 1)[0] not in INFORMATIONAL]
 
         out_segs.append({

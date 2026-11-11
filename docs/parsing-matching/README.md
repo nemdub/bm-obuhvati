@@ -12,7 +12,8 @@ it), and a **code reference** so the test can be pinned to the implementation.
 ## How the data flows
 
 ```
-RIK .doc/.docx ──stage02──▶ stations.parquet (raw_coverage_text per station)
+BM export ──stage02_fetch_bm──▶ stations.parquet (raw_coverage_text per station; doc 13)
+  (legacy: RIK .doc/.docx ──stage02_extract_docs, STATION_SOURCE="rik")
                               │
 register CSVs ──stage01──▶ addresses / streets / settlements / municipalities
                               │
@@ -48,6 +49,7 @@ rules must stay in lock‑step with stage04, which is why it gets its own docume
 | 10 | [10-station-edits.md](10-station-edits.md) | Station‑level reviewer edits: fix raw source text (re‑parse), add a new station, remove one (tombstone); worker tables, the stage03c reconcile step, pristine snapshots for revert/restore | `stage03c_reconcile_edits.py`, `worker/src/index.ts` |
 | 11 | [11-volunteer-merge.md](11-volunteer-merge.md) | Standalone one‑off: cleanup/normalize the volunteer geojson + xlsx + kmz (+ data‑quality report), then combine volunteer‑primary / automated‑fallback into a separate export. NOT part of the pipeline or Worker | `clean_volunteer_data.py`, `combine_volunteer.py`, `fetch_prod_polygons.sh` |
 | 12 | [12-polygon-geometry.md](12-polygon-geometry.md) | Geometry stage: per‑station Voronoi territory clipped to the naselje boundary (contiguous non‑overlapping shapes, with halo + outlier safeguards) → muni clip → despike → overlap‑safe small‑hole removal → adaptive simplify; the non‑overlap invariant; the before/after map iteration toggle | `stage05_voronoi.py`, `sync_r2.sh`, `worker/src/db.ts` |
+| 13 | [13-bm-source.md](13-bm-source.md) | **Current station source**: the bm.itblokada.org export — fetching, the station‑id scheme, the BM coverage dialect (explicit house numbers), house‑number evidence for same‑named streets, the «НЕМА УЛИЦЕ» no‑street pass, old‑vs‑new comparison, backup/rollback | `stage02_fetch_bm.py`, `coverage_parse.parse_bm`, `stage04_match_addresses.py`, `compare_sources.py`, `backup_state.sh` |
 
 ## Conventions used in these docs
 
